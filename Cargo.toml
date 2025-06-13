@@ -1,0 +1,13 @@
+[package]
+name = "varclock"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive"] }
+noodles = { version = "0.99.0", features = ["bam", "bed", "vcf"] }
+noodles-bam = "0.81.0"
+noodles-bed = "0.26.0"
+noodles-core = "0.17.0"
+noodles-vcf = "0.79.0"
+noodles-sam = "0.77.0"
