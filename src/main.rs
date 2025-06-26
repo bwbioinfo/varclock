@@ -1,11 +1,14 @@
 // Standard library imports for file I/O and path handling
-use std::{fs::File, io::{BufReader, Write, Read, Cursor}, path::PathBuf};
+use std::{fs::File, io::{BufReader, Write, Read, Cursor}, path::PathBuf, sync::Arc};
 
 // Command-line argument parsing library
 use clap::Parser;
 
 // Parallel processing
 use rayon::prelude::*;
+
+// Async runtime and utilities
+use futures;
 
 // Bioinformatics file format libraries from the noodles ecosystem
 use noodles_bam as bam;  // Binary Alignment/Map format for sequencing reads
@@ -293,65 +296,89 @@ fn load_bed_regions(bed_path: &PathBuf) -> Result<Vec<BedRegion>, Box<dyn std::e
     Ok(regions)
 }
 
-/// Process a single BED region and stream results to output file
-fn process_bed_region<W: Write>(
+/// Async version of process_bed_region with enhanced parallelization
+async fn process_bed_region_async<W: Write + Send>(
     region_idx: usize,
-    bed_region: &BedRegion,
-    vcf_path: &PathBuf,
-    bam_path: &PathBuf,
-    output_writer: &std::sync::Mutex<W>,
+    bed_region: BedRegion,
+    vcf_path: Arc<PathBuf>,
+    bam_path: Arc<PathBuf>,
+    output_writer: Arc<std::sync::Mutex<W>>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    println!("Processing BED region #{}: {}", region_idx, bed_region.region_string);
+    println!("Processing BED region #{}: {} (async)", region_idx, bed_region.region_string);
     
-    // Query variants from VCF for this region
-    let variants = query_variants_for_region(vcf_path, bed_region)?;
-    println!("  Found {} variants in region", variants.len());
+    // Use tokio::spawn for parallel I/O operations
+    let vcf_task = {
+        let vcf_path = Arc::clone(&vcf_path);
+        let bed_region = bed_region.clone();
+        tokio::task::spawn_blocking(move || {
+            query_variants_for_region(&vcf_path, &bed_region)
+        })
+    };
     
-    // If no variants found, skip this region and continue to next
+    let bam_task = {
+        let bam_path = Arc::clone(&bam_path);
+        let bed_region = bed_region.clone();
+        tokio::task::spawn_blocking(move || {
+            query_bam_reads_for_region(&bam_path, &bed_region.chrom, bed_region.start_pos, bed_region.end_pos)
+        })
+    };
+    
+    // Wait for both I/O operations to complete concurrently
+    let (variants_result, bam_reads_result) = tokio::try_join!(vcf_task, bam_task)?;
+    let variants = variants_result?;
+    let bam_reads = bam_reads_result?;
+    
+    println!("  Found {} variants and {} reads in region (async)", variants.len(), bam_reads.len());
+    
+    // If no variants found, skip this region
     if variants.is_empty() {
         println!("  No variants found in region {}, skipping...", bed_region.region_string);
         return Ok(0);
     }
     
-    // Query BAM reads for this specific region
-    let bam_reads = query_bam_reads_for_region(bam_path, &bed_region.chrom, bed_region.start_pos, bed_region.end_pos)?;
-    println!("  Found {} reads overlapping region", bam_reads.len());
-    
     let mut lines_written = 0;
     
-    // Process each variant and stream results immediately
-    for variant in &variants {
-        // Find reads that overlap with this variant
-        let overlapping_lines: Vec<String> = bam_reads
+    // Process variants in parallel chunks for better CPU utilization
+    const CHUNK_SIZE: usize = 10; // Process variants in chunks
+    for variant_chunk in variants.chunks(CHUNK_SIZE) {
+        // Process each chunk of variants in parallel
+        let chunk_results: Vec<Vec<String>> = variant_chunk
             .par_iter()
-            .filter_map(|(read_id, start_pos, end_pos, timestamp)| {
-                let contains_variant = read_overlaps_variant(*start_pos, *end_pos, variant.pos);
-                
-                Some(format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    read_id,
-                    timestamp,
-                    contains_variant,
-                    variant.description,
-                    variant.variant_type,
-                    bed_region.region_string,
-                    bed_region.region_name
-                ))
+            .map(|variant| {
+                // Find reads that overlap with this variant (parallel processing)
+                bam_reads
+                    .par_iter()
+                    .filter_map(|(read_id, start_pos, end_pos, timestamp)| {
+                        let contains_variant = read_overlaps_variant(*start_pos, *end_pos, variant.pos);
+                        
+                        Some(format!(
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            read_id,
+                            timestamp,
+                            contains_variant,
+                            variant.description,
+                            variant.variant_type,
+                            bed_region.region_string,
+                            bed_region.region_name
+                        ))
+                    })
+                    .collect()
             })
             .collect();
         
-        // Write results immediately to output file
+        // Write results immediately to output file in a single lock
         {
             let mut writer = output_writer.lock().unwrap();
-            for line in &overlapping_lines {
-                writeln!(*writer, "{}", line)?;
+            for lines in &chunk_results {
+                for line in lines {
+                    writeln!(*writer, "{}", line)?;
+                    lines_written += 1;
+                }
             }
         }
-        
-        lines_written += overlapping_lines.len();
     }
     
-    println!("  Processed region #{} with {} output lines", region_idx, lines_written);
+    println!("  Processed region #{} with {} output lines (async)", region_idx, lines_written);
     Ok(lines_written)
 }
 
@@ -517,18 +544,23 @@ fn process_vcf_records<R: std::io::Read>(
                         None => ".".to_string()
                     };
                     
-                    let description = format!("{}>{}", ref_bases, alt_bases);
-                    
-                    let variant_type = if ref_bases.len() == 1 && alt_bases.len() == 1 && alt_bases != "." {
-                        "SNV".to_string()
+                    let (description, variant_type) = if alt_bases.contains('[') || alt_bases.contains(']') {
+                        // BND (breakend) variants have special notation
+                        // Examples: 
+                        // G]17:198982] - piece extending to the right of position 198982 on chr17
+                        // ]13:123456]T - piece extending to the left of position 123456 on chr13
+                        let bnd_description = parse_bnd_variant(&ref_bases, &alt_bases);
+                        (bnd_description, "BND".to_string())
+                    } else if ref_bases.len() == 1 && alt_bases.len() == 1 && alt_bases != "." {
+                        (format!("{}>{}", ref_bases, alt_bases), "SNV".to_string())
                     } else if ref_bases.len() > alt_bases.len() {
-                        "DEL".to_string()
+                        (format!("{}>{}", ref_bases, alt_bases), "DEL".to_string())
                     } else if ref_bases.len() < alt_bases.len() {
-                        "INS".to_string()
+                        (format!("{}>{}", ref_bases, alt_bases), "INS".to_string())
                     } else if ref_bases.len() == alt_bases.len() && ref_bases.len() > 1 {
-                        "MNV".to_string()
+                        (format!("{}>{}", ref_bases, alt_bases), "MNV".to_string())
                     } else {
-                        "OTHER".to_string()
+                        (format!("{}>{}", ref_bases, alt_bases), "OTHER".to_string())
                     };
                     
                     println!("    FOUND VARIANT: {}:{} {} ({})", vcf_chrom_str, variant_pos, description, variant_type);
@@ -551,6 +583,33 @@ fn process_vcf_records<R: std::io::Read>(
             total_variants_seen, matching_chrom_variants, bed_region.chrom, variants.len());
     
     Ok(variants)
+}
+
+/// Parse BND (breakend) variant notation to extract meaningful description
+/// BND variants represent structural variations like translocations and inversions
+/// Examples of BND notation:
+/// - G]17:198982] means sequence extends to the right of position 198982 on chr17
+/// - ]13:123456]T means sequence extends to the left of position 123456 on chr13
+/// - G[17:198982[ means sequence extends to the left of position 198982 on chr17
+/// - [13:123456[T means sequence extends to the right of position 123456 on chr13
+fn parse_bnd_variant(ref_bases: &str, alt_bases: &str) -> String {
+    // Extract the breakend information from the alt allele
+    if let Some(bracket_start) = alt_bases.find('[') {
+        if let Some(bracket_end) = alt_bases.find(']') {
+            // Format: s1[p[s2 or s1]p]s2
+            let mate_info = &alt_bases[bracket_start + 1..bracket_end];
+            return format!("BND_{}>{}_to_{}", ref_bases, alt_bases, mate_info);
+        }
+    } else if let Some(bracket_start) = alt_bases.find(']') {
+        if let Some(bracket_end) = alt_bases.rfind('[') {
+            // Format: ]p]s2 or s1]p[
+            let mate_info = &alt_bases[bracket_start + 1..bracket_end];
+            return format!("BND_{}>{}_to_{}", ref_bases, alt_bases, mate_info);
+        }
+    }
+    
+    // Fallback for complex BND notation
+    format!("BND_{}>{}", ref_bases, alt_bases)
 }
 
 /// Command-line arguments structure for the bioinformatics scanner tool
@@ -587,6 +646,11 @@ struct Args {
     /// Number of parallel threads to use for processing (default: number of CPU cores)
     #[arg(short, long, default_value_t = num_cpus::get())]
     threads: usize,
+
+    /// Maximum number of concurrent regions to process simultaneously (default: 8)
+    /// Higher values use more memory but may improve throughput for large datasets
+    #[arg(long, default_value_t = 8)]
+    max_concurrent_regions: usize,
 }
 
 /// Main function that orchestrates the bioinformatics analysis pipeline
@@ -601,17 +665,18 @@ struct Args {
 ///    d. Write results to output file
 /// 
 /// Returns: Result type for error handling - Ok(()) on success, Err on failure
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments using clap derive macro
     let args = Args::parse();
 
-    // Configure Rayon thread pool
+    // Configure Rayon thread pool for CPU-intensive work
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global()
         .unwrap();
 
-    println!("Starting VarClock analysis with {} threads...", args.threads);
+    println!("Starting VarClock analysis with {} threads (async mode)...", args.threads);
     println!("Input files:");
     println!("  BED file: {:?}", args.bed);
     println!("  VCF file: {:?}", args.vcf);
@@ -638,31 +703,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load all BED regions first
     let bed_regions = load_bed_regions(&args.bed)?;
     
-    println!("\n=== Processing {} BED regions in parallel ===", bed_regions.len());
+    println!("\n=== Processing {} BED regions with async parallelization ===", bed_regions.len());
     
-    // Create a mutex-wrapped writer for thread-safe streaming output
-    let output_mutex = std::sync::Mutex::new(&mut output);
+    // Create Arc-wrapped shared resources for async processing
+    let vcf_path = Arc::new(args.vcf);
+    let bam_path = Arc::new(args.bam);
+    let output_mutex = Arc::new(std::sync::Mutex::new(output));
     
-    // Process BED regions in parallel, streaming results directly to file
-    let results: Vec<_> = bed_regions
-        .par_iter()
-        .enumerate()
-        .map(|(region_idx, bed_region)| {
-            process_bed_region(region_idx + 1, bed_region, &args.vcf, &args.bam, &output_mutex)
-        })
-        .collect();
+    // Process BED regions with controlled concurrency
+    let max_concurrent_regions = args.max_concurrent_regions;
     
-    // Count total lines written and handle any errors
     let mut total_lines_written = 0;
-    for result in results {
-        match result {
-            Ok(lines_written) => {
-                total_lines_written += lines_written;
-            }
-            Err(e) => {
-                eprintln!("Error processing region: {:?}", e);
+    
+    // Process regions in chunks to manage memory and concurrency
+    let mut regions_processed = 0;
+    
+    for chunk in bed_regions.chunks(max_concurrent_regions) {
+        let tasks: Vec<_> = chunk
+            .iter()
+            .enumerate()
+            .map(|(chunk_idx, bed_region)| {
+                let vcf_path = Arc::clone(&vcf_path);
+                let bam_path = Arc::clone(&bam_path);
+                let output_mutex = Arc::clone(&output_mutex);
+                let bed_region = bed_region.clone();
+                
+                // Calculate actual region index across all chunks
+                let region_idx = regions_processed + chunk_idx + 1;
+                
+                tokio::spawn(async move {
+                    process_bed_region_async(
+                        region_idx,
+                        bed_region,
+                        vcf_path,
+                        bam_path,
+                        output_mutex,
+                    ).await
+                })
+            })
+            .collect();
+        
+        // Wait for all tasks in this chunk to complete
+        let results = futures::future::join_all(tasks).await;
+        
+        // Process results and count lines written
+        for result in results {
+            match result {
+                Ok(Ok(lines_written)) => {
+                    total_lines_written += lines_written;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Error processing region: {:?}", e);
+                }
+                Err(e) => {
+                    eprintln!("Task panicked: {:?}", e);
+                }
             }
         }
+        
+        regions_processed += chunk.len();
+        println!("Completed chunk with {} regions, {} total regions processed, {} total lines written", 
+                chunk.len(), regions_processed, total_lines_written);
     }
     
     println!("Total lines written to output: {}", total_lines_written);
