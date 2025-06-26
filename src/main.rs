@@ -84,7 +84,6 @@ fn query_bam_reads_indexed(
     let query = indexed_reader.query(&header, &region)?;
     
     let mut reads = Vec::new();
-    let bam_record = bam::Record::default();
     
     for result in query {
     let record = result?;
@@ -294,13 +293,14 @@ fn load_bed_regions(bed_path: &PathBuf) -> Result<Vec<BedRegion>, Box<dyn std::e
     Ok(regions)
 }
 
-/// Process a single BED region: find variants and check which reads overlap
-fn process_bed_region(
+/// Process a single BED region and stream results to output file
+fn process_bed_region<W: Write>(
     region_idx: usize,
     bed_region: &BedRegion,
     vcf_path: &PathBuf,
     bam_path: &PathBuf,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    output_writer: &std::sync::Mutex<W>,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     println!("Processing BED region #{}: {}", region_idx, bed_region.region_string);
     
     // Query variants from VCF for this region
@@ -310,46 +310,49 @@ fn process_bed_region(
     // If no variants found, skip this region and continue to next
     if variants.is_empty() {
         println!("  No variants found in region {}, skipping...", bed_region.region_string);
-        return Ok(Vec::new());
+        return Ok(0);
     }
     
     // Query BAM reads for this specific region
     let bam_reads = query_bam_reads_for_region(bam_path, &bed_region.chrom, bed_region.start_pos, bed_region.end_pos)?;
     println!("  Found {} reads overlapping region", bam_reads.len());
     
-    let mut output_lines = Vec::new();
+    let mut lines_written = 0;
     
-    // Process each variant in parallel
-    let variant_results: Vec<_> = variants
-        .par_iter()
-        .flat_map(|variant| {
-            // Find reads that overlap with this variant
-            let overlapping_reads: Vec<_> = bam_reads
-                .par_iter()
-                .filter_map(|(read_id, start_pos, end_pos, timestamp)| {
-                    let contains_variant = read_overlaps_variant(*start_pos, *end_pos, variant.pos);
-                    
-                    Some(format!(
-                        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                        read_id,
-                        timestamp,
-                        contains_variant,
-                        variant.description,
-                        variant.variant_type,
-                        bed_region.region_string,
-                        bed_region.region_name
-                    ))
-                })
-                .collect();
-            
-            overlapping_reads
-        })
-        .collect();
+    // Process each variant and stream results immediately
+    for variant in &variants {
+        // Find reads that overlap with this variant
+        let overlapping_lines: Vec<String> = bam_reads
+            .par_iter()
+            .filter_map(|(read_id, start_pos, end_pos, timestamp)| {
+                let contains_variant = read_overlaps_variant(*start_pos, *end_pos, variant.pos);
+                
+                Some(format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    read_id,
+                    timestamp,
+                    contains_variant,
+                    variant.description,
+                    variant.variant_type,
+                    bed_region.region_string,
+                    bed_region.region_name
+                ))
+            })
+            .collect();
+        
+        // Write results immediately to output file
+        {
+            let mut writer = output_writer.lock().unwrap();
+            for line in &overlapping_lines {
+                writeln!(*writer, "{}", line)?;
+            }
+        }
+        
+        lines_written += overlapping_lines.len();
+    }
     
-    output_lines.extend(variant_results);
-    
-    println!("  Processed region #{} with {} output lines", region_idx, output_lines.len());
-    Ok(output_lines)
+    println!("  Processed region #{} with {} output lines", region_idx, lines_written);
+    Ok(lines_written)
 }
 
 /// Query VCF variants for a specific genomic region using indexed access
@@ -637,26 +640,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("\n=== Processing {} BED regions in parallel ===", bed_regions.len());
     
-    // Process BED regions in parallel
+    // Create a mutex-wrapped writer for thread-safe streaming output
+    let output_mutex = std::sync::Mutex::new(&mut output);
+    
+    // Process BED regions in parallel, streaming results directly to file
     let results: Vec<_> = bed_regions
         .par_iter()
         .enumerate()
         .map(|(region_idx, bed_region)| {
-            process_bed_region(region_idx + 1, bed_region, &args.vcf, &args.bam)
+            process_bed_region(region_idx + 1, bed_region, &args.vcf, &args.bam, &output_mutex)
         })
-        .collect();    // Write all results to output file
+        .collect();
+    
+    // Count total lines written and handle any errors
+    let mut total_lines_written = 0;
     for result in results {
         match result {
-            Ok(region_results) => {
-                for line in region_results {
-                    writeln!(output, "{}", line)?;
-                }
+            Ok(lines_written) => {
+                total_lines_written += lines_written;
             }
             Err(e) => {
                 eprintln!("Error processing region: {:?}", e);
             }
         }
     }
+    
+    println!("Total lines written to output: {}", total_lines_written);
 
     println!("\n=== Analysis Complete ===");
     println!("Processed {} BED regions", bed_regions.len());
