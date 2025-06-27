@@ -12,12 +12,12 @@ use futures::future;
 
 // Import our library modules
 use varclock::{
-    BedRegion, BgzOutput,
+    BedRegion, Variant, BgzOutput,
     load_bed_regions,
     query_vcf_variants_for_region, 
     query_bam_records_for_region,
     read_spans_variant_position,
-    analyze_read_allele_content_detailed,
+    analyze_read_variant_content,
 };
 
 /// Command-line arguments structure for the bioinformatics scanner tool
@@ -47,8 +47,7 @@ struct Args {
     bam: PathBuf,
 
     /// Output file path for results (will be in BGZ-compressed TSV format)
-    /// Contains: read_id, timestamp, allele_match, variant_chrom, variant_pos, variant_ref, variant_alt, variant_description, variant_type, region, region_name, read_start, read_end, mapping_quality
-    /// allele_match values: REFERENCE:sequence (read matches reference), VARIANT:sequence (read matches variant allele)
+    /// Contains: read_id, timestamp, contains_variant, variant_description, variant_type, region, region_name, read_start, read_end, mapping_quality
     /// File will be compressed using BGZF format and optionally indexed with tabix
     #[arg(short, long)]
     output: PathBuf,
@@ -71,10 +70,6 @@ struct Args {
     /// Larger chunks reduce overhead but may increase memory usage
     #[arg(long, default_value_t = 50)]
     variant_chunk_size: usize,
-
-    /// Enable debug output with detailed variant analysis information
-    #[arg(long, default_value_t = false)]
-    debug: bool,
 }
 
 /// Prints detailed information about the current thread pool configuration
@@ -104,7 +99,6 @@ async fn process_bed_region_async(
     bam_path: Arc<PathBuf>,
     output_writer: Arc<std::sync::Mutex<BgzOutput>>,
     variant_chunk_size: usize,
-    debug: bool,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     println!("Processing BED region #{}: {} (async with indexed access)", region_idx, bed_region.region_string);
     
@@ -119,26 +113,6 @@ async fn process_bed_region_async(
     }.await??;
     
     println!("  Found {} variants in region (indexed VCF)", variants.len());
-    
-    // Show detailed variant information including depth data
-    if debug {
-        for (i, variant) in variants.iter().enumerate().take(5) {
-            let depth_info = match (variant.ref_depth, variant.alt_depth, variant.total_depth) {
-                (Some(ref_d), Some(alt_d), _) => format!(" [REF={}, ALT={}]", ref_d, alt_d),
-                (_, _, Some(total_d)) => format!(" [Total={}]", total_d),
-                _ => " [No depth info]".to_string(),
-            };
-            
-            println!("    DEBUG: Variant {}: {}:{} {}>{} ({}){} - desc: '{}'", 
-                    i + 1, variant.chrom, variant.pos, variant.ref_allele, variant.alt_allele, 
-                    variant.variant_type, depth_info, variant.description);
-        }
-        if variants.len() > 5 {
-            println!("    DEBUG: ... and {} more variants (showing positions: {})", 
-                    variants.len() - 5,
-                    variants.iter().skip(5).take(10).map(|v| v.pos.to_string()).collect::<Vec<_>>().join(", "));
-        }
-    }
     
     // PHASE 2: EARLY TERMINATION CHECK
     // Skip analysis if no variants present (optimization for sparse regions)
@@ -199,91 +173,14 @@ async fn process_bed_region_async(
                     let variant_start = variant.pos.saturating_sub(1);
                     let variant_end = variant.pos + 1;
                     
-                    // Show detailed variant and query information
-                    if debug {
-                        println!("      DEBUG: Processing variant {}:{} {}>{} ({}) - '{}'", 
-                                bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele, 
-                                variant.variant_type, variant.description);
-                        println!("      DEBUG: Querying BAM region {}:{}-{} for this variant", 
-                                bed_region.chrom, variant_start, variant_end);
-                    }
-                    
                     // Extract BAM records that might span this variant position
                     let variant_records = match query_bam_records_for_region(
                         &bam_path, 
                         &bed_region.chrom, 
                         variant_start, 
-                        variant_end,
-                        debug
+                        variant_end
                     ) {
-                        Ok(records) => {
-                            if debug {
-                                println!("      DEBUG: Found {} reads for variant {}:{} {}>{}", 
-                                        records.len(), bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele);
-                                
-                                // Show details of first few reads found including sequences
-                                if !records.is_empty() {
-                                    println!("      DEBUG: Sample reads found:");
-                                    for (i, (record, read_id, start_pos, end_pos, timestamp, mapq)) in records.iter().enumerate().take(3) {
-                                        // Extract the sequence from the BAM record
-                                        let sequence = {
-                                            let seq = record.sequence();
-                                            // Convert sequence to string, showing first 50 bases
-                                            let mut seq_str = String::new();
-                                            let seq_len = seq.len();
-                                            let display_len = seq_len.min(50);
-                                            
-                                            for i in 0..display_len {
-                                                if let Some(base) = seq.get(i) {
-                                                    seq_str.push(match base {
-                                                        // Try ASCII encoding first (most common)
-                                                        b'A' => 'A',
-                                                        b'C' => 'C', 
-                                                        b'G' => 'G',
-                                                        b'T' => 'T',
-                                                        b'N' => 'N',
-                                                        // Also try the standard BAM 4-bit encoding as fallback
-                                                        0 => '=',  // Reference skip
-                                                        1 => 'A',  // A = 1  
-                                                        2 => 'C',  // C = 2
-                                                        4 => 'G',  // G = 4
-                                                        8 => 'T',  // T = 8
-                                                        15 => 'N', // N = 15
-                                                        3 => 'G',  // Sometimes G = 3
-                                                        5 => 'T',  // Sometimes T = 5
-                                                        _ => {
-                                                            // For any other value, use as ASCII if printable
-                                                            if base >= 32 && base <= 126 {
-                                                                base as char
-                                                            } else {
-                                                                '?'
-                                                            }
-                                                        },
-                                                    });
-                                                } else {
-                                                    seq_str.push('?');
-                                                }
-                                            }
-                                            
-                                            if seq_len > 50 {
-                                                format!("{}... (len={})", seq_str, seq_len)
-                                            } else {
-                                                format!("{} (len={})", seq_str, seq_len)
-                                            }
-                                        };
-                                        
-                                        println!("        Read {}: {} at {}:{}-{} (mapq={}, ts={})", 
-                                                i + 1, read_id, bed_region.chrom, start_pos, end_pos, mapq, 
-                                                if timestamp.len() > 20 { &timestamp[..20] } else { timestamp });
-                                        println!("          Sequence: {}", sequence);
-                                    }
-                                    if records.len() > 3 {
-                                        println!("        ... and {} more reads", records.len() - 3);
-                                    }
-                                }
-                            }
-                            records
-                        },
+                        Ok(records) => records,
                         Err(e) => {
                             eprintln!("Warning: Failed to query reads for variant at {}:{}: {:?}", 
                                     bed_region.chrom, variant.pos, e);
@@ -293,128 +190,35 @@ async fn process_bed_region_async(
                     };
                     
                     // SEQUENCE-BASED VARIANT ANALYSIS:
-                    let mut reads_processed = 0;
-                    let mut reads_spanning = 0;
-                    let mut reads_with_definitive_match = 0;
-                    
-                    let result: Vec<String> = variant_records
+                    let result = variant_records
                         .iter()
                         .filter_map(|(record, read_id, start_pos, end_pos, timestamp, mapping_quality)| {
-                            reads_processed += 1;
-                            
-                            // DEBUG: Show read details for first few reads
-                            if reads_processed <= 3 {
-                                // Extract a portion of the read sequence for debug
-                                let seq_preview = {
-                                    let seq = record.sequence();
-                                    let mut seq_str = String::new();
-                                    let display_len = seq.len().min(30); // Show first 30 bases
-                                    
-                                    for i in 0..display_len {
-                                        if let Some(base) = seq.get(i) {
-                                            seq_str.push(match base {
-                                                // Try ASCII encoding first (most common)
-                                                b'A' => 'A',
-                                                b'C' => 'C', 
-                                                b'G' => 'G',
-                                                b'T' => 'T',
-                                                b'N' => 'N',
-                                                // Also try the standard BAM 4-bit encoding as fallback
-                                                0 => '=',  // Reference skip
-                                                1 => 'A',  // A = 1  
-                                                2 => 'C',  // C = 2
-                                                4 => 'G',  // G = 4
-                                                8 => 'T',  // T = 8
-                                                15 => 'N', // N = 15
-                                                3 => 'G',  // Sometimes G = 3
-                                                5 => 'T',  // Sometimes T = 5
-                                                _ => {
-                                                    // For any other value, use as ASCII if printable
-                                                    if base >= 32 && base <= 126 {
-                                                        base as char
-                                                    } else {
-                                                        '?'
-                                                    }
-                                                },
-                                            });
-                                        } else {
-                                            seq_str.push('?');
-                                        }
-                                    }
-                                    
-                                    if seq.len() > 30 {
-                                        format!("{}...", seq_str)
-                                    } else {
-                                        seq_str
-                                    }
-                                };
-                                
-                                if debug {
-                                    println!("        DEBUG: Read {}: {} spans {}:{}-{}, analyzing for variant {}:{} {}>{}", 
-                                            reads_processed, read_id, bed_region.chrom, start_pos, end_pos, 
-                                            bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele);
-                                    println!("        DEBUG: Read {} sequence: {}", reads_processed, seq_preview);
-                                }
-                            }
-                            
                             // STEP 1: Check if read spans the variant position (quick filter)
                             if !read_spans_variant_position(*start_pos, *end_pos, variant.pos) {
-                                if debug && reads_processed <= 3 {
-                                    println!("        DEBUG: Read {} does NOT span variant position", reads_processed);
-                                }
                                 return None; // Skip reads that don't span the variant position
                             }
                             
-                            reads_spanning += 1;
-                            if debug && reads_processed <= 3 {
-                                println!("        DEBUG: Read {} SPANS variant position", reads_processed);
-                            }
-                            
                             // STEP 2: Analyze read sequence to determine variant content
-                            let allele_result = analyze_read_allele_content_detailed(
+                            let contains_variant = match analyze_read_variant_content(
                                 record, 
                                 variant.pos, 
                                 &variant.ref_allele, 
-                                &variant.alt_allele,
-                                debug
-                            );
-                            
-                            if debug && reads_processed <= 3 {
-                                let result_description = match &allele_result {
-                                    varclock::AlleleMatch::Reference(seq) => format!("REFERENCE match (found: {})", seq),
-                                    varclock::AlleleMatch::Variant(seq) => format!("VARIANT match (found: {})", seq),
-                                    varclock::AlleleMatch::Other(seq) => format!("OTHER sequence (found: {})", seq),
-                                    varclock::AlleleMatch::NoSpan => "NO SPAN (read doesn't span variant)".to_string(),
-                                    varclock::AlleleMatch::Deletion => "DELETION (variant in deletion)".to_string(),
-                                    varclock::AlleleMatch::Indeterminate => "INDETERMINATE (couldn't analyze)".to_string(),
-                                };
-                                println!("        DEBUG: Read {} allele analysis: {}", 
-                                        reads_processed, result_description);
-                                println!("        DEBUG: Expected - REF: '{}', ALT: '{}'", 
-                                        variant.ref_allele, variant.alt_allele);
-                            }
-                            
-                            // Only include reads with definitive matches (skip indeterminate/other)
-                            if !allele_result.is_definitive_match() {
-                                if debug && reads_processed <= 3 {
-                                    println!("        DEBUG: Read {} does NOT have definitive match", reads_processed);
+                                &variant.alt_allele
+                            ) {
+                                Some(true) => true,   // Read contains alternative allele
+                                Some(false) => false, // Read contains reference allele
+                                None => {
+                                    // Cannot determine - skip this read
+                                    return None;
                                 }
-                                return None;
-                            }
-                            
-                            reads_with_definitive_match += 1;
-                            if debug && reads_processed <= 3 {
-                                println!("        DEBUG: Read {} HAS definitive match", reads_processed);
-                            }
-                            
-                            let allele_match = allele_result.to_output_string();
+                            };
                             
                             // OUTPUT FORMAT: Tab-separated values with read and variant metadata
                             Some(format!(
                                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_id,                    // Read identifier
                                 timestamp,                  // Sequencing timestamp
-                                allele_match,               // VARIANT:seq|REFERENCE:seq - which allele the read contains
+                                contains_variant,           // TRUE if read contains variant allele (sequence-verified)
                                 variant.chrom,              // Variant chromosome
                                 variant.pos,                // Variant position (1-based)
                                 variant.ref_allele,         // Reference allele
@@ -429,59 +233,6 @@ async fn process_bed_region_async(
                             ))
                         })
                         .collect();  // Collect results for this variant
-                    
-                    // Report filtering statistics
-                    if debug {
-                        println!("      DEBUG: Variant {}:{} - {} reads total, {} spanning, {} with definitive matches, {} output lines", 
-                                bed_region.chrom, variant.pos, reads_processed, reads_spanning, reads_with_definitive_match, result.len());
-                    }
-                    
-                    // SANITY CHECK: Compare our results with VCF depth information
-                    let ref_count = result.iter().filter(|line| line.contains("REFERENCE:")).count();
-                    let alt_count = result.iter().filter(|line| line.contains("VARIANT:")).count();
-                    
-                    if let (Some(vcf_ref), Some(vcf_alt)) = (variant.ref_depth, variant.alt_depth) {
-                        println!("      SANITY CHECK: VCF reports REF={} ALT={}, we found REF={} ALT={}", 
-                                vcf_ref, vcf_alt, ref_count, alt_count);
-                        
-                        let ref_diff = (ref_count as i32 - vcf_ref as i32).abs();
-                        let alt_diff = (alt_count as i32 - vcf_alt as i32).abs();
-                        
-                        if ref_diff > 0 || alt_diff > 0 {
-                            println!("      WARNING: Read count mismatch! REF diff: {}, ALT diff: {}", ref_diff, alt_diff);
-                        } else {
-                            println!("      PASS: Read counts match VCF exactly!");
-                        }
-                    } else if let Some(vcf_total) = variant.total_depth {
-                        println!("      SANITY CHECK: VCF reports total depth={}, we found {} supporting reads", 
-                                vcf_total, result.len());
-                        
-                        let total_diff = (result.len() as i32 - vcf_total as i32).abs();
-                        if total_diff > vcf_total as i32 / 2 { // Allow 50% difference for total depth
-                            println!("      WARNING: Large difference in total depth! Diff: {}", total_diff);
-                        }
-                    } else {
-                        println!("      SANITY CHECK: No VCF depth information available for comparison");
-                    }
-                    
-                    // Show actual allele matches for this variant
-                    if debug {
-                        if !result.is_empty() {
-                            println!("      DEBUG: Allele matches for variant {}:{}:", bed_region.chrom, variant.pos);
-                            for (i, line) in result.iter().enumerate().take(3) {
-                                // Extract just the read_id and allele_match columns for cleaner output
-                                let parts: Vec<&str> = line.split('\t').collect();
-                                if parts.len() >= 3 {
-                                    println!("        Match {}: Read {} -> {}", i + 1, parts[0], parts[2]);
-                                }
-                            }
-                            if result.len() > 3 {
-                                println!("        ... and {} more matches", result.len() - 3);
-                            }
-                        } else {
-                            println!("      DEBUG: No allele matches found for variant {}:{}", bed_region.chrom, variant.pos);
-                        }
-                    }
                     
                     // THREAD MONITORING: Clean up thread count when done
                     active_threads.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -570,7 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the BGZ output file and write TSV header row
     let mut bgz_output = BgzOutput::new(output_path.clone(), args.create_index)?;
     
-    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality") {
+    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tcontains_variant\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality") {
         println!("ERROR: Failed to write header to output file: {:?}", e);
         return Err(format!("Failed to write header: {:?}", e).into());
     }
@@ -578,19 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ===== BED FILE PROCESSING =====
     // Load all BED regions first
-    let bed_regions = load_bed_regions(&args.bed, args.debug)?;
-    
-    // Show loaded BED regions
-    if args.debug {
-        println!("DEBUG: Loaded BED regions:");
-        for (i, region) in bed_regions.iter().enumerate().take(10) {
-            println!("  Region {}: {} ({}:{}-{}, name: '{}')", 
-                    i + 1, region.region_string, region.chrom, region.start_pos, region.end_pos, region.region_name);
-        }
-        if bed_regions.len() > 10 {
-            println!("  ... and {} more regions", bed_regions.len() - 10);
-        }
-    }
+    let bed_regions = load_bed_regions(&args.bed)?;
     
     println!("\n=== Processing {} BED regions with async parallelization ===", bed_regions.len());
     
@@ -621,7 +360,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bam_path = Arc::clone(&bam_path);
                 let output_mutex = Arc::clone(&output_mutex);
                 let bed_region = bed_region.clone();
-                let debug = args.debug;
                 
                 // Global task monitoring
                 let global_tasks = Arc::clone(&global_active_tasks);
@@ -655,7 +393,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         bam_path,
                         output_mutex,
                         variant_chunk_size,
-                        debug,
                     ).await;
                     
                     // Decrement active task count when done

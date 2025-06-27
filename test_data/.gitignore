@@ -2,3 +2,6 @@
 **/*.bam
 **/*.vcf*
 **/*.tsv
+**/*.tsv.gz
+*.tsv
+*.tsv.gz

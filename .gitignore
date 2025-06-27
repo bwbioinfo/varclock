@@ -24,3 +24,7 @@ target/
 **/*.vcf*
 **/*.tsv
 **/*.bai
+**/*.tsv
+**/*.tsv.gz
+*.tsv
+*.tsv.gz
