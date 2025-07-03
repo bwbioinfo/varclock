@@ -119,14 +119,45 @@ pub fn extract_read_bases_at_position(sequence: &bam::record::Sequence, start_po
     bases
 }
 
-/// Determine the type of variant based on allele lengths
+/// Determine the type of variant based on allele sequences and patterns
 /// 
 /// **Returns:**
 /// - `"SNV"`: Single nucleotide variant
+/// - `"MNV"`: Multi-nucleotide variant
 /// - `"INS"`: Insertion
 /// - `"DEL"`: Deletion  
+/// - `"DUP"`: Duplication
+/// - `"BND"`: Breakend/translocation
 /// - `"COMPLEX"`: Complex variant
 pub fn classify_variant_type(ref_allele: &str, alt_allele: &str) -> &'static str {
+    // Check for breakend variants (BND) - characterized by special symbols
+    if alt_allele.contains('[') || alt_allele.contains(']') || alt_allele.contains('<') {
+        return "BND";
+    }
+    
+    // Check for symbolic alleles indicating structural variants
+    if alt_allele.starts_with('<') && alt_allele.ends_with('>') {
+        match alt_allele {
+            "<DUP>" | "<TDUP>" | "<DUP:TANDEM>" => return "DUP",
+            "<DEL>" => return "DEL",
+            "<INS>" => return "INS",
+            "<INV>" => return "INV",
+            "<CNV>" => return "CNV",
+            _ => return "COMPLEX"
+        }
+    }
+    
+    // Check for duplications based on sequence patterns
+    // Tandem duplications often show the reference sequence repeated in the alt
+    if alt_allele.len() > ref_allele.len() && alt_allele.starts_with(ref_allele) {
+        let inserted_part = &alt_allele[ref_allele.len()..];
+        // Check if the inserted part matches the beginning of ref (tandem duplication pattern)
+        if ref_allele.starts_with(inserted_part) || inserted_part == ref_allele {
+            return "DUP";
+        }
+    }
+    
+    // Standard size-based classification
     match (ref_allele.len(), alt_allele.len()) {
         (r, a) if r == a && r == 1 => "SNV",
         (r, a) if r == a && r > 1 => "MNV", // Multi-nucleotide variant
@@ -199,8 +230,20 @@ pub fn analyze_read_allele_content_detailed(
             // Use CIGAR-based analysis for insertions
             analyze_insertion_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
         }
+        "DUP" => {
+            // Use CIGAR-based analysis for duplications
+            analyze_duplication_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
+        }
+        "BND" => {
+            // Use CIGAR-based analysis for breakends
+            analyze_breakend_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
+        }
+        "INV" | "CNV" => {
+            // Use breakend analysis for inversions and CNVs (similar complex patterns)
+            analyze_breakend_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
+        }
         _ => {
-            // Complex variants - try sequence-based analysis
+            // Complex variants and other types - try sequence-based analysis
             analyze_snv_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
         }
     }
@@ -310,7 +353,7 @@ fn analyze_deletion_from_cigar(
     
     if debug {
         println!("        DEBUG: Analyzing deletion {}>{} at pos {} in read starting at {}", 
-                 ref_allele, alt_allele, variant_pos, read_start);
+                ref_allele, alt_allele, variant_pos, read_start);
     }
     
     for operation in cigar.iter() {
@@ -319,7 +362,7 @@ fn analyze_deletion_from_cigar(
             
             if debug {
                 println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
-                         op.kind(), op_len, ref_pos, read_pos);
+                        op.kind(), op_len, ref_pos, read_pos);
             }
             
             match op.kind() {
@@ -334,7 +377,7 @@ fn analyze_deletion_from_cigar(
                         
                         if debug {
                             println!("        DEBUG: Found match at variant pos, read_base='{}', alt_allele='{}'", 
-                                     read_base, alt_allele);
+                                    read_base, alt_allele);
                         }
                         
                         if read_base == alt_allele {
@@ -362,7 +405,7 @@ fn analyze_deletion_from_cigar(
                         if debug {
                             println!("        DEBUG: Found deletion after alt base at ref position {}", ref_pos);
                             println!("        DEBUG: Deletion length: {}, expected length: {}", 
-                                     op_len, expected_deletion_length);
+                                    op_len, expected_deletion_length);
                         }
                         
                         if op_len >= expected_deletion_length {
@@ -449,7 +492,7 @@ fn analyze_insertion_from_cigar(
     
     if debug {
         println!("        DEBUG: Analyzing insertion {}>{} at pos {} in read starting at {}", 
-                 ref_allele, alt_allele, variant_pos, read_start);
+                ref_allele, alt_allele, variant_pos, read_start);
     }
     
     for operation in cigar.iter() {
@@ -458,7 +501,7 @@ fn analyze_insertion_from_cigar(
             
             if debug {
                 println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
-                         op.kind(), op_len, ref_pos, read_pos);
+                        op.kind(), op_len, ref_pos, read_pos);
             }
             
             match op.kind() {
@@ -473,7 +516,7 @@ fn analyze_insertion_from_cigar(
                         
                         if debug {
                             println!("        DEBUG: Found match at variant pos, read_base='{}', ref_allele='{}'", 
-                                     read_base, ref_allele);
+                                    read_base, ref_allele);
                         }
                         
                         if read_base == ref_allele {
@@ -504,7 +547,7 @@ fn analyze_insertion_from_cigar(
                         
                         if debug {
                             println!("        DEBUG: Inserted bases: '{}', expected length: {}", 
-                                     inserted_bases, expected_insertion_length);
+                                    inserted_bases, expected_insertion_length);
                         }
                         
                         // For VCF format insertions like G>GATC, the expected insertion is "ATC" (after G)
@@ -559,6 +602,230 @@ fn analyze_insertion_from_cigar(
     AlleleMatch::Indeterminate
 }
 
+/// Analyze duplication variants using CIGAR operations
+fn analyze_duplication_from_cigar(
+    record: &bam::Record,
+    variant_pos: usize,
+    ref_allele: &str,
+    alt_allele: &str,
+    debug: bool,
+) -> AlleleMatch {
+    let read_start = match record.alignment_start() {
+        Some(Ok(start)) => usize::from(start),
+        _ => return AlleleMatch::Indeterminate,
+    };
+    
+    let cigar = record.cigar();
+    let read_sequence = record.sequence();
+    
+    if debug {
+        println!("        DEBUG: Analyzing duplication {}>{} at pos {} in read starting at {}", 
+                ref_allele, alt_allele, variant_pos, read_start);
+    }
+    
+    // For duplications, we expect to see the duplicated sequence in the read
+    // Handle symbolic duplications like <DUP>
+    if alt_allele == "<DUP>" || alt_allele == "<TDUP>" || alt_allele == "<DUP:TANDEM>" {
+        // For symbolic duplications, we can't easily verify from sequence alone
+        // Use CIGAR to look for insertions or complex patterns
+        let mut ref_pos = read_start;
+        let mut read_pos = 0usize;
+        
+        for operation in cigar.iter() {
+            if let Ok(op) = operation {
+                let op_len = usize::from(op.len());
+                
+                if debug {
+                    println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
+                             op.kind(), op_len, ref_pos, read_pos);
+                }
+                
+                // Check if we're in the variant region
+                if ref_pos <= variant_pos && variant_pos < ref_pos + op_len {
+                    match op.kind() {
+                        Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                            // In a duplication, we might see normal matching
+                            return AlleleMatch::Reference(ref_allele.to_string());
+                        }
+                        Kind::Insertion => {
+                            // Duplications often manifest as insertions in the read
+                            return AlleleMatch::Variant(format!("DUP:{}", alt_allele));
+                        }
+                        _ => {}
+                    }
+                }
+                
+                // Advance positions
+                match op.kind() {
+                    Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                        ref_pos += op_len;
+                        read_pos += op_len;
+                    }
+                    Kind::Deletion | Kind::Skip => {
+                        ref_pos += op_len;
+                    }
+                    Kind::Insertion | Kind::SoftClip => {
+                        read_pos += op_len;
+                    }
+                    Kind::HardClip | Kind::Pad => {}
+                }
+            }
+        }
+        
+        // For symbolic duplications, default to indeterminate if we can't determine
+        return AlleleMatch::Indeterminate;
+    }
+    
+    // For sequence-based duplications (e.g., A > ATAT), analyze the sequence
+    if alt_allele.len() > ref_allele.len() {
+        // Map to variant position and extract sequence
+        let mut ref_pos = read_start;
+        let mut read_pos = 0usize;
+        
+        for operation in cigar.iter() {
+            if let Ok(op) = operation {
+                let op_len = usize::from(op.len());
+                
+                if ref_pos <= variant_pos && variant_pos < ref_pos + op_len {
+                    match op.kind() {
+                        Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                            let offset_in_op = variant_pos - ref_pos;
+                            let read_variant_pos = read_pos + offset_in_op;
+                            
+                            // Extract sequence at variant position
+                            let read_bases = extract_read_bases_at_position(&read_sequence, read_variant_pos, alt_allele.len());
+                            
+                            if debug {
+                                println!("        DEBUG: Found duplication candidate, read_bases='{}', alt_allele='{}'", 
+                                         read_bases, alt_allele);
+                            }
+                            
+                            if read_bases == alt_allele {
+                                return AlleleMatch::Variant(read_bases);
+                            } else if read_bases.starts_with(ref_allele) {
+                                return AlleleMatch::Reference(ref_allele.to_string());
+                            } else {
+                                return AlleleMatch::Other(read_bases);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                
+                // Advance positions
+                match op.kind() {
+                    Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch => {
+                        ref_pos += op_len;
+                        read_pos += op_len;
+                    }
+                    Kind::Deletion | Kind::Skip => {
+                        ref_pos += op_len;
+                    }
+                    Kind::Insertion | Kind::SoftClip => {
+                        read_pos += op_len;
+                    }
+                    Kind::HardClip | Kind::Pad => {}
+                }
+            }
+        }
+    }
+    
+    AlleleMatch::Indeterminate
+}
+
+/// Analyze breakend (BND) variants 
+fn analyze_breakend_from_cigar(
+    record: &bam::Record,
+    variant_pos: usize,
+    ref_allele: &str,
+    alt_allele: &str,
+    debug: bool,
+) -> AlleleMatch {
+    let read_start = match record.alignment_start() {
+        Some(Ok(start)) => usize::from(start),
+        _ => return AlleleMatch::Indeterminate,
+    };
+    
+    if debug {
+        println!("        DEBUG: Analyzing breakend {}>{} at pos {} in read starting at {}", 
+                ref_allele, alt_allele, variant_pos, read_start);
+    }
+    
+    // Breakend variants are complex structural variants that involve chromosome rearrangements
+    // They are typically represented with special notation like:
+    // - t[chr:pos[ (translocation)
+    // - ]chr:pos]t (translocation)
+    // - t<chr:pos> (other complex rearrangement)
+    
+    // For breakends, we primarily look for soft/hard clipping or split reads
+    // which indicate the read spans a breakpoint
+    
+    let cigar = record.cigar();
+    let mut has_clipping = false;
+    let mut has_complex_pattern = false;
+    
+    for operation in cigar.iter() {
+        if let Ok(op) = operation {
+            let op_len = usize::from(op.len());
+            
+            match op.kind() {
+                Kind::SoftClip | Kind::HardClip => {
+                    has_clipping = true;
+                    if debug {
+                        println!("        DEBUG: Found clipping {:?}({}) - potential breakend support", 
+                                 op.kind(), op_len);
+                    }
+                }
+                Kind::Skip => {
+                    // Large skips might indicate structural variants
+                    if op_len > 1000 {
+                        has_complex_pattern = true;
+                        if debug {
+                            println!("        DEBUG: Found large skip {}bp - potential breakend support", op_len);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    
+    // Check if read spans the variant position
+    let read_end = {
+        let cigar = record.cigar();
+        let mut reference_pos = read_start;
+        for operation in cigar.iter() {
+            if let Ok(op) = operation {
+                let op_len = usize::from(op.len());
+                match op.kind() {
+                    Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
+                        reference_pos += op_len;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if reference_pos > read_start { reference_pos - 1 } else { read_start }
+    };
+    
+    if variant_pos < read_start || variant_pos > read_end {
+        return AlleleMatch::NoSpan;
+    }
+    
+    // For breakends, the presence of clipping or complex patterns near the variant
+    // position suggests the read might support the breakend
+    if has_clipping || has_complex_pattern {
+        if debug {
+            println!("        DEBUG: Breakend evidence found (clipping={}, complex={})", 
+                     has_clipping, has_complex_pattern);
+        }
+        return AlleleMatch::Variant(format!("BND:{}", alt_allele));
+    }
+    
+    // If no breakend evidence, assume reference
+    AlleleMatch::Reference(ref_allele.to_string())
+}
+
 /// Legacy function for backwards compatibility
 pub fn analyze_read_variant_content(
     record: &bam::Record, 
@@ -595,9 +862,27 @@ mod tests {
         assert_eq!(classify_variant_type("ATG", "A"), "DEL");
         assert_eq!(classify_variant_type("CTAG", "C"), "DEL");
         
+        // Test duplication
+        assert_eq!(classify_variant_type("A", "AAA"), "DUP"); // Tandem duplication pattern
+        assert_eq!(classify_variant_type("AT", "ATAT"), "DUP"); // Tandem duplication
+        assert_eq!(classify_variant_type("G", "<DUP>"), "DUP"); // Symbolic duplication
+        assert_eq!(classify_variant_type("C", "<TDUP>"), "DUP"); // Tandem duplication symbolic
+        
+        // Test breakend
+        assert_eq!(classify_variant_type("A", "A[chr2:1000["), "BND"); // Breakend notation
+        assert_eq!(classify_variant_type("T", "]chr3:5000]T"), "BND"); // Breakend notation
+        assert_eq!(classify_variant_type("G", "G<chr4:2000>"), "BND"); // Complex breakend
+        
+        // Test symbolic variants
+        assert_eq!(classify_variant_type("ATG", "<DEL>"), "DEL"); // Symbolic deletion
+        assert_eq!(classify_variant_type("C", "<INS>"), "INS"); // Symbolic insertion
+        assert_eq!(classify_variant_type("ATCG", "<INV>"), "INV"); // Inversion
+        assert_eq!(classify_variant_type("A", "<CNV>"), "CNV"); // Copy number variant
+        
         // Test complex
         assert_eq!(classify_variant_type("AT", "GCA"), "COMPLEX");
         assert_eq!(classify_variant_type("ATG", "GC"), "COMPLEX");
+        assert_eq!(classify_variant_type("G", "<UNKNOWN>"), "COMPLEX"); // Unknown symbolic
     }
     
     #[test]
