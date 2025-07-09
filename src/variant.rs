@@ -46,9 +46,9 @@ impl AlleleMatch {
     /// Convert to string representation for output
     pub fn to_output_string(&self) -> String {
         match self {
-            AlleleMatch::Reference(seq) => format!("REFERENCE:{}", seq),
-            AlleleMatch::Variant(seq) => format!("VARIANT:{}", seq),
-            AlleleMatch::Other(seq) => format!("OTHER:{}", seq),
+            AlleleMatch::Reference(seq) => format!("REFERENCE:{seq}"),
+            AlleleMatch::Variant(seq) => format!("VARIANT:{seq}"),
+            AlleleMatch::Other(seq) => format!("OTHER:{seq}"),
             AlleleMatch::NoSpan => "NO_SPAN".to_string(),
             AlleleMatch::Deletion => "DELETION".to_string(),
             AlleleMatch::Indeterminate => "INDETERMINATE".to_string(),
@@ -104,7 +104,7 @@ pub fn extract_read_bases_at_position(sequence: &bam::record::Sequence, start_po
                 5 => 'T',  // Sometimes T = 5
                 _ => {
                     // For any other value, use as ASCII if printable
-                    if base >= 32 && base <= 126 {
+                    if (32..=126).contains(&base) {
                         base as char
                     } else {
                         'N'
@@ -198,7 +198,7 @@ pub fn analyze_read_allele_content_detailed(
     let mut reference_pos = read_start;
     for operation in cigar.iter() {
         if let Ok(op) = operation {
-            let op_len = usize::from(op.len());
+            let op_len = op.len();
             match op.kind() {
                 Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
                     reference_pos += op_len;
@@ -271,7 +271,7 @@ fn analyze_snv_from_cigar(
     
     for operation in cigar.iter() {
         if let Ok(op) = operation {
-            let op_len = usize::from(op.len());
+            let op_len = op.len();
             
             // Check if we've reached the variant position
             if ref_pos <= variant_pos && variant_pos < ref_pos + op_len {
@@ -352,13 +352,12 @@ fn analyze_deletion_from_cigar(
     let mut alt_base_read_pos = 0;
     
     if debug {
-        println!("        DEBUG: Analyzing deletion {}>{} at pos {} in read starting at {}", 
-                ref_allele, alt_allele, variant_pos, read_start);
+        println!("        DEBUG: Analyzing deletion {ref_allele}>{alt_allele} at pos {variant_pos} in read starting at {read_start}");
     }
     
     for operation in cigar.iter() {
         if let Ok(op) = operation {
-            let op_len = usize::from(op.len());
+            let op_len = op.len();
             
             if debug {
                 println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
@@ -376,8 +375,7 @@ fn analyze_deletion_from_cigar(
                         let read_base = extract_read_bases_at_position(&read_sequence, read_variant_pos, alt_allele.len());
                         
                         if debug {
-                            println!("        DEBUG: Found match at variant pos, read_base='{}', alt_allele='{}'", 
-                                    read_base, alt_allele);
+                            println!("        DEBUG: Found match at variant pos, read_base='{read_base}', alt_allele='{alt_allele}'");
                         }
                         
                         if read_base == alt_allele {
@@ -403,15 +401,14 @@ fn analyze_deletion_from_cigar(
                     // at the position right after the variant position
                     if found_alt_base && ref_pos == variant_pos + alt_allele.len() {
                         if debug {
-                            println!("        DEBUG: Found deletion after alt base at ref position {}", ref_pos);
-                            println!("        DEBUG: Deletion length: {}, expected length: {}", 
-                                    op_len, expected_deletion_length);
+                            println!("        DEBUG: Found deletion after alt base at ref position {ref_pos}");
+                            println!("        DEBUG: Deletion length: {op_len}, expected length: {expected_deletion_length}");
                         }
                         
                         if op_len >= expected_deletion_length {
-                            return AlleleMatch::Variant(format!("DEL:{}>{}", ref_allele, alt_allele));
+                            return AlleleMatch::Variant(format!("DEL:{ref_allele}>{alt_allele}"));
                         } else {
-                            return AlleleMatch::Other(format!("DEL:{}bp@{}_expected:{}bp", op_len, ref_pos, expected_deletion_length));
+                            return AlleleMatch::Other(format!("DEL:{op_len}bp@{ref_pos}_expected:{expected_deletion_length}bp"));
                         }
                     }
                     
@@ -422,9 +419,9 @@ fn analyze_deletion_from_cigar(
                     if variant_pos >= deletion_start && variant_pos <= deletion_end {
                         // The variant position itself is deleted
                         if op_len >= expected_deletion_length {
-                            return AlleleMatch::Variant(format!("DEL:{}>{}", ref_allele, alt_allele));
+                            return AlleleMatch::Variant(format!("DEL:{ref_allele}>{alt_allele}"));
                         } else {
-                            return AlleleMatch::Other(format!("DEL:{}bp@{}_expected:{}bp", op_len, deletion_start, expected_deletion_length));
+                            return AlleleMatch::Other(format!("DEL:{op_len}bp@{deletion_start}_expected:{expected_deletion_length}bp"));
                         }
                     }
                     
@@ -457,7 +454,7 @@ fn analyze_deletion_from_cigar(
             return AlleleMatch::Reference(read_base);
         } else if read_base.starts_with(alt_allele) && read_base.len() < ref_allele.len() {
             // We have the alt allele but not the full ref, suggesting deletion
-            return AlleleMatch::Variant(format!("DEL:{}>{}", ref_allele, alt_allele));
+            return AlleleMatch::Variant(format!("DEL:{ref_allele}>{alt_allele}"));
         } else {
             return AlleleMatch::Other(read_base);
         }
@@ -491,13 +488,12 @@ fn analyze_insertion_from_cigar(
     let mut reference_base_read_pos = 0;
     
     if debug {
-        println!("        DEBUG: Analyzing insertion {}>{} at pos {} in read starting at {}", 
-                ref_allele, alt_allele, variant_pos, read_start);
+        println!("        DEBUG: Analyzing insertion {ref_allele}>{alt_allele} at pos {variant_pos} in read starting at {read_start}");
     }
     
     for operation in cigar.iter() {
         if let Ok(op) = operation {
-            let op_len = usize::from(op.len());
+            let op_len = op.len();
             
             if debug {
                 println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
@@ -515,8 +511,7 @@ fn analyze_insertion_from_cigar(
                         let read_base = extract_read_bases_at_position(&read_sequence, read_variant_pos, ref_allele.len());
                         
                         if debug {
-                            println!("        DEBUG: Found match at variant pos, read_base='{}', ref_allele='{}'", 
-                                    read_base, ref_allele);
+                            println!("        DEBUG: Found match at variant pos, read_base='{read_base}', ref_allele='{ref_allele}'");
                         }
                         
                         if read_base == ref_allele {
@@ -539,15 +534,14 @@ fn analyze_insertion_from_cigar(
                     // at the position right after the variant position
                     if found_reference_base && ref_pos == variant_pos + ref_allele.len() {
                         if debug {
-                            println!("        DEBUG: Found insertion after reference base at ref position {}", ref_pos);
+                            println!("        DEBUG: Found insertion after reference base at ref position {ref_pos}");
                         }
                         
                         // Extract the inserted sequence
                         let inserted_bases = extract_read_bases_at_position(&read_sequence, read_pos, op_len);
                         
                         if debug {
-                            println!("        DEBUG: Inserted bases: '{}', expected length: {}", 
-                                    inserted_bases, expected_insertion_length);
+                            println!("        DEBUG: Inserted bases: '{inserted_bases}', expected length: {expected_insertion_length}");
                         }
                         
                         // For VCF format insertions like G>GATC, the expected insertion is "ATC" (after G)
@@ -558,19 +552,19 @@ fn analyze_insertion_from_cigar(
                         };
                         
                         if debug {
-                            println!("        DEBUG: Expected insertion sequence: '{}'", expected_insertion);
+                            println!("        DEBUG: Expected insertion sequence: '{expected_insertion}'");
                         }
                         
                         if op_len >= expected_insertion_length && !expected_insertion.is_empty() {
                             // Check if the insertion matches what we expect
                             if inserted_bases.starts_with(expected_insertion) {
-                                return AlleleMatch::Variant(format!("INS:{}>{}", ref_allele, alt_allele));
+                                return AlleleMatch::Variant(format!("INS:{ref_allele}>{alt_allele}"));
                             } else {
-                                return AlleleMatch::Other(format!("INS:{}bp@{}_found:{}", op_len, ref_pos, inserted_bases));
+                                return AlleleMatch::Other(format!("INS:{op_len}bp@{ref_pos}_found:{inserted_bases}"));
                             }
                         } else if op_len > 0 {
                             // Any insertion at this position that doesn't match expected
-                            return AlleleMatch::Other(format!("INS:{}bp@{}_found:{}", op_len, ref_pos, inserted_bases));
+                            return AlleleMatch::Other(format!("INS:{op_len}bp@{ref_pos}_found:{inserted_bases}"));
                         }
                     }
                     
@@ -619,8 +613,7 @@ fn analyze_duplication_from_cigar(
     let read_sequence = record.sequence();
     
     if debug {
-        println!("        DEBUG: Analyzing duplication {}>{} at pos {} in read starting at {}", 
-                ref_allele, alt_allele, variant_pos, read_start);
+        println!("        DEBUG: Analyzing duplication {ref_allele}>{alt_allele} at pos {variant_pos} in read starting at {read_start}");
     }
     
     // For duplications, we expect to see the duplicated sequence in the read
@@ -633,11 +626,11 @@ fn analyze_duplication_from_cigar(
         
         for operation in cigar.iter() {
             if let Ok(op) = operation {
-                let op_len = usize::from(op.len());
+                let op_len = op.len();
                 
                 if debug {
                     println!("        DEBUG: CIGAR op {:?}({}) at ref_pos={}, read_pos={}", 
-                             op.kind(), op_len, ref_pos, read_pos);
+                            op.kind(), op_len, ref_pos, read_pos);
                 }
                 
                 // Check if we're in the variant region
@@ -649,7 +642,7 @@ fn analyze_duplication_from_cigar(
                         }
                         Kind::Insertion => {
                             // Duplications often manifest as insertions in the read
-                            return AlleleMatch::Variant(format!("DUP:{}", alt_allele));
+                            return AlleleMatch::Variant(format!("DUP:{alt_allele}"));
                         }
                         _ => {}
                     }
@@ -684,7 +677,7 @@ fn analyze_duplication_from_cigar(
         
         for operation in cigar.iter() {
             if let Ok(op) = operation {
-                let op_len = usize::from(op.len());
+                let op_len = op.len();
                 
                 if ref_pos <= variant_pos && variant_pos < ref_pos + op_len {
                     match op.kind() {
@@ -696,8 +689,7 @@ fn analyze_duplication_from_cigar(
                             let read_bases = extract_read_bases_at_position(&read_sequence, read_variant_pos, alt_allele.len());
                             
                             if debug {
-                                println!("        DEBUG: Found duplication candidate, read_bases='{}', alt_allele='{}'", 
-                                         read_bases, alt_allele);
+                                println!("        DEBUG: Found duplication candidate, read_bases='{read_bases}', alt_allele='{alt_allele}'");
                             }
                             
                             if read_bases == alt_allele {
@@ -747,8 +739,7 @@ fn analyze_breakend_from_cigar(
     };
     
     if debug {
-        println!("        DEBUG: Analyzing breakend {}>{} at pos {} in read starting at {}", 
-                ref_allele, alt_allele, variant_pos, read_start);
+        println!("        DEBUG: Analyzing breakend {ref_allele}>{alt_allele} at pos {variant_pos} in read starting at {read_start}");
     }
     
     // Breakend variants are complex structural variants that involve chromosome rearrangements
@@ -766,14 +757,14 @@ fn analyze_breakend_from_cigar(
     
     for operation in cigar.iter() {
         if let Ok(op) = operation {
-            let op_len = usize::from(op.len());
+            let op_len = op.len();
             
             match op.kind() {
                 Kind::SoftClip | Kind::HardClip => {
                     has_clipping = true;
                     if debug {
                         println!("        DEBUG: Found clipping {:?}({}) - potential breakend support", 
-                                 op.kind(), op_len);
+                                op.kind(), op_len);
                     }
                 }
                 Kind::Skip => {
@@ -781,7 +772,7 @@ fn analyze_breakend_from_cigar(
                     if op_len > 1000 {
                         has_complex_pattern = true;
                         if debug {
-                            println!("        DEBUG: Found large skip {}bp - potential breakend support", op_len);
+                            println!("        DEBUG: Found large skip {op_len}bp - potential breakend support");
                         }
                     }
                 }
@@ -794,15 +785,13 @@ fn analyze_breakend_from_cigar(
     let read_end = {
         let cigar = record.cigar();
         let mut reference_pos = read_start;
-        for operation in cigar.iter() {
-            if let Ok(op) = operation {
-                let op_len = usize::from(op.len());
-                match op.kind() {
-                    Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
-                        reference_pos += op_len;
-                    }
-                    _ => {}
+        for op in cigar.iter().flatten() {
+            let op_len = op.len();
+            match op.kind() {
+                Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
+                    reference_pos += op_len;
                 }
+                _ => {}
             }
         }
         if reference_pos > read_start { reference_pos - 1 } else { read_start }
@@ -816,10 +805,9 @@ fn analyze_breakend_from_cigar(
     // position suggests the read might support the breakend
     if has_clipping || has_complex_pattern {
         if debug {
-            println!("        DEBUG: Breakend evidence found (clipping={}, complex={})", 
-                     has_clipping, has_complex_pattern);
+            println!("        DEBUG: Breakend evidence found (clipping={has_clipping}, complex={has_complex_pattern})");
         }
-        return AlleleMatch::Variant(format!("BND:{}", alt_allele));
+        return AlleleMatch::Variant(format!("BND:{alt_allele}"));
     }
     
     // If no breakend evidence, assume reference

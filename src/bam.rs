@@ -27,7 +27,7 @@ pub fn query_bam_records_for_region(
     debug: bool,
 ) -> Result<Vec<(bam::Record, String, usize, usize, String, u8)>, Box<dyn std::error::Error + Send + Sync>> {
     if debug {
-        println!("    DEBUG: BAM query - file: {:?}, region: {}:{}-{}", bam_path, chrom, start_pos, end_pos);
+        println!("    DEBUG: BAM query - file: {bam_path:?}, region: {chrom}:{start_pos}-{end_pos}");
     }
     // STEP 1: Initialize indexed BAM reader
     if debug {
@@ -49,7 +49,7 @@ pub fn query_bam_records_for_region(
     
     // STEP 3: Execute indexed query
     if debug {
-        println!("    DEBUG: Executing BAM query for region {}...", region);
+        println!("    DEBUG: Executing BAM query for region {region}...");
     }
     let query = indexed_reader.query(&header, &region)?;
     
@@ -60,7 +60,7 @@ pub fn query_bam_records_for_region(
     for result in query {
         record_count += 1;
         if debug && record_count <= 5 {
-            println!("    DEBUG: Processing BAM record #{}", record_count);
+            println!("    DEBUG: Processing BAM record #{record_count}");
         }
         
         let record = result?;
@@ -77,17 +77,15 @@ pub fn query_bam_records_for_region(
             let cigar = record.cigar();
             let mut reference_pos = start;
 
-            for operation in cigar.iter() {
-                if let Ok(op) = operation {
-                    use noodles_sam::alignment::record::cigar::op::Kind;
-                    let op_len = usize::from(op.len());
+            for op in cigar.iter().flatten() {
+                use noodles_sam::alignment::record::cigar::op::Kind;
+                let op_len = op.len();
 
-                    match op.kind() {
-                        Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
-                            reference_pos += op_len;
-                        }
-                        _ => {}
+                match op.kind() {
+                    Kind::Match | Kind::SequenceMatch | Kind::SequenceMismatch | Kind::Deletion | Kind::Skip => {
+                        reference_pos += op_len;
                     }
+                    _ => {}
                 }
             }
 
@@ -106,24 +104,24 @@ pub fn query_bam_records_for_region(
                         sam::alignment::record::data::field::Value::String(ts_bytes) => {
                             std::str::from_utf8(ts_bytes).unwrap_or("INVALID_UTF8").to_string()
                         }
-                        sam::alignment::record::data::field::Value::Int8(val) => format!("INT8_{}", val),
-                        sam::alignment::record::data::field::Value::UInt8(val) => format!("UINT8_{}", val),
-                        sam::alignment::record::data::field::Value::Int16(val) => format!("INT16_{}", val),
-                        sam::alignment::record::data::field::Value::UInt16(val) => format!("UINT16_{}", val),
-                        sam::alignment::record::data::field::Value::Int32(val) => format!("INT32_{}", val),
-                        sam::alignment::record::data::field::Value::UInt32(val) => format!("UINT32_{}", val),
-                        sam::alignment::record::data::field::Value::Float(val) => format!("FLOAT_{}", val),
-                        _ => format!("UNKNOWN_TYPE_{:?}", field_value),
+                        sam::alignment::record::data::field::Value::Int8(val) => format!("INT8_{val}"),
+                        sam::alignment::record::data::field::Value::UInt8(val) => format!("UINT8_{val}"),
+                        sam::alignment::record::data::field::Value::Int16(val) => format!("INT16_{val}"),
+                        sam::alignment::record::data::field::Value::UInt16(val) => format!("UINT16_{val}"),
+                        sam::alignment::record::data::field::Value::Int32(val) => format!("INT32_{val}"),
+                        sam::alignment::record::data::field::Value::UInt32(val) => format!("UINT32_{val}"),
+                        sam::alignment::record::data::field::Value::Float(val) => format!("FLOAT_{val}"),
+                        _ => format!("UNKNOWN_TYPE_{field_value:?}"),
                     }
                 }
-                Some(Err(e)) => format!("PARSE_ERROR_{:?}", e),
+                Some(Err(e)) => format!("PARSE_ERROR_{e:?}"),
                 None => "NA".to_string(),
             }
         };
 
         // Extract mapping quality
         let mapping_quality = record.mapping_quality()
-            .map(|mq| u8::from(mq))
+            .map(u8::from)
             .unwrap_or(0);
 
         // Store the full record along with metadata
@@ -154,7 +152,7 @@ pub fn query_bam_records_for_region(
                             5 => 'T',  // Sometimes T = 5
                             _ => {
                                 // For any other value, use as ASCII if printable
-                                if base >= 32 && base <= 126 {
+                                if (32..=126).contains(&base) {
                                     base as char
                                 } else {
                                     '?'
@@ -173,9 +171,8 @@ pub fn query_bam_records_for_region(
                 }
             };
             
-            println!("    DEBUG: Stored record #{}: {} at {}:{}-{} (mapq={}, timestamp={})", 
-                    record_count, read_id, chrom, read_start, read_end, mapping_quality, timestamp);
-            println!("    DEBUG: Record #{} sequence: {}", record_count, sequence_debug);
+            println!("    DEBUG: Stored record #{record_count}: {read_id} at {chrom}:{read_start}-{read_end} (mapq={mapping_quality}, timestamp={timestamp})");
+            println!("    DEBUG: Record #{record_count} sequence: {sequence_debug}");
         }
         records.push((record, read_id, read_start, read_end, timestamp, mapping_quality));
     }

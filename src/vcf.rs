@@ -180,19 +180,19 @@ fn query_vcf_variants_indexed(
             (bnd_description, "BND".to_string())
         } else if ref_bases.len() == 1 && alt_bases.len() == 1 && alt_bases != "." {
             // Single nucleotide variant (SNV)
-            (format!("{}>{}", ref_bases, alt_bases), "SNV".to_string())
+            (format!("{ref_bases}>{alt_bases}"), "SNV".to_string())
         } else if ref_bases.len() > alt_bases.len() {
             // Deletion (DEL)
-            (format!("{}>{}", ref_bases, alt_bases), "DEL".to_string())
+            (format!("{ref_bases}>{alt_bases}"), "DEL".to_string())
         } else if ref_bases.len() < alt_bases.len() {
             // Insertion (INS)
-            (format!("{}>{}", ref_bases, alt_bases), "INS".to_string())
+            (format!("{ref_bases}>{alt_bases}"), "INS".to_string())
         } else if ref_bases.len() == alt_bases.len() && ref_bases.len() > 1 {
             // Multi-nucleotide variant (MNV)
-            (format!("{}>{}", ref_bases, alt_bases), "MNV".to_string())
+            (format!("{ref_bases}>{alt_bases}"), "MNV".to_string())
         } else {
             // Other/complex variant types
-            (format!("{}>{}", ref_bases, alt_bases), "OTHER".to_string())
+            (format!("{ref_bases}>{alt_bases}"), "OTHER".to_string())
         };
         
         // STEP 6: Extract depth and quality information
@@ -234,16 +234,15 @@ pub fn parse_bnd_variant(ref_bases: &str, alt_bases: &str) -> String {
         if let Some(bracket_end) = alt_bases.find(']') {
             // Format: s1[p[s2 or s1]p]s2
             let mate_info = &alt_bases[bracket_start + 1..bracket_end];
-            return format!("BND_{}>{}_to_{}", ref_bases, alt_bases, mate_info);
+            return format!("BND_{ref_bases}>{alt_bases}_to_{mate_info}");
         }
-    } else if let Some(bracket_start) = alt_bases.find(']') {
-        if let Some(bracket_end) = alt_bases.rfind('[') {
+    } else if let Some(bracket_start) = alt_bases.find(']')
+        && let Some(bracket_end) = alt_bases.rfind('[') {
             // Format: ]p]s2 or s1]p[
             let mate_info = &alt_bases[bracket_start + 1..bracket_end];
-            return format!("BND_{}>{}_to_{}", ref_bases, alt_bases, mate_info);
+            return format!("BND_{ref_bases}>{alt_bases}_to_{mate_info}");
         }
-    }
     
     // Fallback for complex BND notation
-    format!("BND_{}>{}", ref_bases, alt_bases)
+    format!("BND_{ref_bases}>{alt_bases}")
 }

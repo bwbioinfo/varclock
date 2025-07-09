@@ -30,7 +30,7 @@ impl BgzOutput {
     
     /// Write a line to the BGZ file
     pub fn write_line(&mut self, line: &str) -> Result<(), std::io::Error> {
-        writeln!(self.writer, "{}", line)?;
+        writeln!(self.writer, "{line}")?;
         Ok(())
     }
     

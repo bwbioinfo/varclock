@@ -32,7 +32,7 @@ pub fn load_bed_regions(bed_path: &PathBuf, debug: bool) -> Result<Vec<BedRegion
                 
                 let start_pos = usize::from(start);
                 let end_pos = usize::from(end);
-                let region_string = format!("{}:{}-{}", chrom, start_pos, end_pos);
+                let region_string = format!("{chrom}:{start_pos}-{end_pos}");
                 
                 regions.push(BedRegion {
                     chrom: chrom.clone(),
@@ -43,11 +43,10 @@ pub fn load_bed_regions(bed_path: &PathBuf, debug: bool) -> Result<Vec<BedRegion
                 });
                 
                 if debug {
-                    println!("  Loaded BED region: {} (chromosome: '{}', start: {}, end: {}, name: '{}')", 
-                            region_string, chrom, start_pos, end_pos, region_name);
+                    println!("  Loaded BED region: {region_string} (chromosome: '{chrom}', start: {start_pos}, end: {end_pos}, name: '{region_name}')");
                 }
             }
-            Err(e) => return Err(format!("Error reading BED record: {:?}", e).into()),
+            Err(e) => return Err(format!("Error reading BED record: {e:?}").into()),
         }
     }
     

@@ -83,12 +83,12 @@ fn print_thread_pool_info() {
     let num_threads = rayon::current_num_threads();
     let thread_index = rayon::current_thread_index();
     println!("Thread pool configured:");
-    println!("  Total worker threads: {}", num_threads);
-    println!("  Current thread index: {:?}", thread_index);
+    println!("  Total worker threads: {num_threads}");
+    println!("  Current thread index: {thread_index:?}");
     
     // Print system information for context
     let cpu_count = num_cpus::get();
-    println!("  System CPU cores: {}", cpu_count);
+    println!("  System CPU cores: {cpu_count}");
     println!("  Thread pool efficiency: {:.1}% of available cores", 
              (num_threads as f64 / cpu_count as f64) * 100.0);
 }
@@ -124,8 +124,8 @@ async fn process_bed_region_async(
     if debug {
         for (i, variant) in variants.iter().enumerate().take(5) {
             let depth_info = match (variant.ref_depth, variant.alt_depth, variant.total_depth) {
-                (Some(ref_d), Some(alt_d), _) => format!(" [REF={}, ALT={}]", ref_d, alt_d),
-                (_, _, Some(total_d)) => format!(" [Total={}]", total_d),
+                (Some(ref_d), Some(alt_d), _) => format!(" [REF={ref_d}, ALT={alt_d}]"),
+                (_, _, Some(total_d)) => format!(" [Total={total_d}]"),
                 _ => " [No depth info]".to_string(),
             };
             
@@ -253,7 +253,7 @@ async fn process_bed_region_async(
                                                         5 => 'T',  // Sometimes T = 5
                                                         _ => {
                                                             // For any other value, use as ASCII if printable
-                                                            if base >= 32 && base <= 126 {
+                                                            if (32..=126).contains(&base) {
                                                                 base as char
                                                             } else {
                                                                 '?'
@@ -266,16 +266,16 @@ async fn process_bed_region_async(
                                             }
                                             
                                             if seq_len > 50 {
-                                                format!("{}... (len={})", seq_str, seq_len)
+                                                format!("{seq_str}... (len={seq_len})")
                                             } else {
-                                                format!("{} (len={})", seq_str, seq_len)
+                                                format!("{seq_str} (len={seq_len})")
                                             }
                                         };
                                         
                                         println!("        Read {}: {} at {}:{}-{} (mapq={}, ts={})", 
                                                 i + 1, read_id, bed_region.chrom, start_pos, end_pos, mapq, 
                                                 if timestamp.len() > 20 { &timestamp[..20] } else { timestamp });
-                                        println!("          Sequence: {}", sequence);
+                                        println!("          Sequence: {sequence}");
                                     }
                                     if records.len() > 3 {
                                         println!("        ... and {} more reads", records.len() - 3);
@@ -330,7 +330,7 @@ async fn process_bed_region_async(
                                                 5 => 'T',  // Sometimes T = 5
                                                 _ => {
                                                     // For any other value, use as ASCII if printable
-                                                    if base >= 32 && base <= 126 {
+                                                    if (32..=126).contains(&base) {
                                                         base as char
                                                     } else {
                                                         '?'
@@ -343,7 +343,7 @@ async fn process_bed_region_async(
                                     }
                                     
                                     if seq.len() > 30 {
-                                        format!("{}...", seq_str)
+                                        format!("{seq_str}...")
                                     } else {
                                         seq_str
                                     }
@@ -353,21 +353,21 @@ async fn process_bed_region_async(
                                     println!("        DEBUG: Read {}: {} spans {}:{}-{}, analyzing for variant {}:{} {}>{}", 
                                             reads_processed, read_id, bed_region.chrom, start_pos, end_pos, 
                                             bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele);
-                                    println!("        DEBUG: Read {} sequence: {}", reads_processed, seq_preview);
+                                    println!("        DEBUG: Read {reads_processed} sequence: {seq_preview}");
                                 }
                             }
                             
                             // STEP 1: Check if read spans the variant position (quick filter)
                             if !read_spans_variant_position(*start_pos, *end_pos, variant.pos) {
                                 if debug && reads_processed <= 3 {
-                                    println!("        DEBUG: Read {} does NOT span variant position", reads_processed);
+                                    println!("        DEBUG: Read {reads_processed} does NOT span variant position");
                                 }
                                 return None; // Skip reads that don't span the variant position
                             }
                             
                             reads_spanning += 1;
                             if debug && reads_processed <= 3 {
-                                println!("        DEBUG: Read {} SPANS variant position", reads_processed);
+                                println!("        DEBUG: Read {reads_processed} SPANS variant position");
                             }
                             
                             // STEP 2: Analyze read sequence to determine variant content
@@ -381,15 +381,14 @@ async fn process_bed_region_async(
                             
                             if debug && reads_processed <= 3 {
                                 let result_description = match &allele_result {
-                                    varclock::AlleleMatch::Reference(seq) => format!("REFERENCE match (found: {})", seq),
-                                    varclock::AlleleMatch::Variant(seq) => format!("VARIANT match (found: {})", seq),
-                                    varclock::AlleleMatch::Other(seq) => format!("OTHER sequence (found: {})", seq),
+                                    varclock::AlleleMatch::Reference(seq) => format!("REFERENCE match (found: {seq})"),
+                                    varclock::AlleleMatch::Variant(seq) => format!("VARIANT match (found: {seq})"),
+                                    varclock::AlleleMatch::Other(seq) => format!("OTHER sequence (found: {seq})"),
                                     varclock::AlleleMatch::NoSpan => "NO SPAN (read doesn't span variant)".to_string(),
                                     varclock::AlleleMatch::Deletion => "DELETION (variant in deletion)".to_string(),
                                     varclock::AlleleMatch::Indeterminate => "INDETERMINATE (couldn't analyze)".to_string(),
                                 };
-                                println!("        DEBUG: Read {} allele analysis: {}", 
-                                        reads_processed, result_description);
+                                println!("        DEBUG: Read {reads_processed} allele analysis: {result_description}");
                                 println!("        DEBUG: Expected - REF: '{}', ALT: '{}'", 
                                         variant.ref_allele, variant.alt_allele);
                             }
@@ -397,14 +396,14 @@ async fn process_bed_region_async(
                             // Only include reads with definitive matches (skip indeterminate/other)
                             if !allele_result.is_definitive_match() {
                                 if debug && reads_processed <= 3 {
-                                    println!("        DEBUG: Read {} does NOT have definitive match", reads_processed);
+                                    println!("        DEBUG: Read {reads_processed} does NOT have definitive match");
                                 }
                                 return None;
                             }
                             
                             reads_with_definitive_match += 1;
                             if debug && reads_processed <= 3 {
-                                println!("        DEBUG: Read {} HAS definitive match", reads_processed);
+                                println!("        DEBUG: Read {reads_processed} HAS definitive match");
                             }
                             
                             let allele_match = allele_result.to_output_string();
@@ -441,14 +440,13 @@ async fn process_bed_region_async(
                     let alt_count = result.iter().filter(|line| line.contains("VARIANT:")).count();
                     
                     if let (Some(vcf_ref), Some(vcf_alt)) = (variant.ref_depth, variant.alt_depth) {
-                        println!("      SANITY CHECK: VCF reports REF={} ALT={}, we found REF={} ALT={}", 
-                                vcf_ref, vcf_alt, ref_count, alt_count);
+                        println!("      SANITY CHECK: VCF reports REF={vcf_ref} ALT={vcf_alt}, we found REF={ref_count} ALT={alt_count}");
                         
                         let ref_diff = (ref_count as i32 - vcf_ref as i32).abs();
                         let alt_diff = (alt_count as i32 - vcf_alt as i32).abs();
                         
                         if ref_diff > 0 || alt_diff > 0 {
-                            println!("      WARNING: Read count mismatch! REF diff: {}, ALT diff: {}", ref_diff, alt_diff);
+                            println!("      WARNING: Read count mismatch! REF diff: {ref_diff}, ALT diff: {alt_diff}");
                         } else {
                             println!("      PASS: Read counts match VCF exactly!");
                         }
@@ -458,7 +456,7 @@ async fn process_bed_region_async(
                         
                         let total_diff = (result.len() as i32 - vcf_total as i32).abs();
                         if total_diff > vcf_total as i32 / 2 { // Allow 50% difference for total depth
-                            println!("      WARNING: Large difference in total depth! Diff: {}", total_diff);
+                            println!("      WARNING: Large difference in total depth! Diff: {total_diff}");
                         }
                     } else {
                         println!("      SANITY CHECK: No VCF depth information available for comparison");
@@ -491,7 +489,7 @@ async fn process_bed_region_async(
             
             // THREAD USAGE REPORT: Show how much parallelism was achieved
             let max_concurrent = max_threads_seen.load(std::sync::atomic::Ordering::Relaxed);
-            println!("    Thread usage: max {} concurrent threads (thread IDs active)", max_concurrent);
+            println!("    Thread usage: max {max_concurrent} concurrent threads (thread IDs active)");
             
             results
         };
@@ -522,7 +520,7 @@ async fn process_bed_region_async(
         }
     }
     
-    println!("  Processed region #{} with {} output lines (async cached)", region_idx, lines_written);
+    println!("  Processed region #{region_idx} with {lines_written} output lines (async cached)");
     Ok(lines_written)
 }
 
@@ -550,7 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Create index: {}", args.create_index);
 
     // Ensure output file has .gz extension for BGZ format
-    let output_path = if args.output.extension().map_or(true, |ext| ext != "gz") {
+    let output_path = if args.output.extension().is_none_or(|ext| ext != "gz") {
         let mut new_path = args.output.clone();
         match new_path.extension() {
             Some(ext) => {
@@ -561,7 +559,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 new_path.set_extension("tsv.gz");
             }
         }
-        println!("  Note: Added .gz extension to output file: {:?}", new_path);
+        println!("  Note: Added .gz extension to output file: {new_path:?}");
         new_path
     } else {
         args.output.clone()
@@ -571,8 +569,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bgz_output = BgzOutput::new(output_path.clone(), args.create_index)?;
     
     if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality") {
-        println!("ERROR: Failed to write header to output file: {:?}", e);
-        return Err(format!("Failed to write header: {:?}", e).into());
+        println!("ERROR: Failed to write header to output file: {e:?}");
+        return Err(format!("Failed to write header: {e:?}").into());
     }
     println!("Created BGZ-compressed output file and wrote header");
 
@@ -675,10 +673,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     total_lines_written += lines_written;
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Error processing region: {:?}", e);
+                    eprintln!("Error processing region: {e:?}");
                 }
                 Err(e) => {
-                    eprintln!("Task panicked: {:?}", e);
+                    eprintln!("Task panicked: {e:?}");
                 }
             }
         }
@@ -691,11 +689,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("Completed chunk with {} regions, {} total regions processed, {} total lines written", 
                 chunk.len(), regions_processed, total_lines_written);
-        println!("  Task concurrency: max {} concurrent async tasks, {} currently active", 
-                max_tasks_seen, remaining_tasks);
+        println!("  Task concurrency: max {max_tasks_seen} concurrent async tasks, {remaining_tasks} currently active");
     }
     
-    println!("Total lines written to output: {}", total_lines_written);
+    println!("Total lines written to output: {total_lines_written}");
 
     // Finalize the BGZ output and create index
     println!("Finalizing BGZ-compressed output...");
@@ -713,11 +710,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_max_tasks = max_concurrent_tasks.load(std::sync::atomic::Ordering::Relaxed);
     let final_max_threads = rayon::current_num_threads();
     println!("=== Thread Usage Summary ===");
-    println!("  Rayon thread pool: {} worker threads configured", final_max_threads);
-    println!("  Maximum concurrent async tasks: {} (region-level parallelism)", final_max_tasks);
-    println!("  Hybrid parallelism: {} async tasks × {} Rayon threads per task", final_max_tasks, final_max_threads);
+    println!("  Rayon thread pool: {final_max_threads} worker threads configured");
+    println!("  Maximum concurrent async tasks: {final_max_tasks} (region-level parallelism)");
+    println!("  Hybrid parallelism: {final_max_tasks} async tasks × {final_max_threads} Rayon threads per task");
     println!("  Theoretical max concurrency: {} threads", final_max_tasks * final_max_threads);
-    if bed_regions.len() == 0 {
+    if bed_regions.is_empty() {
         println!("WARNING: No BED regions found! Check if your BED file is empty or malformed.");
         println!("Your BED file should contain lines like:");
         println!("chr1\t10000\t20000\tregion_name");
