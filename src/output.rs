@@ -58,7 +58,7 @@ impl BgzOutput {
     }
     
     /// Create a tabix index for the BGZ file (static method)
-    fn create_tabix_index_for_path(_path: &PathBuf, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
+    fn create_tabix_index_for_path(_path: &std::path::Path, debug: bool) -> Result<(), Box<dyn std::error::Error>> {
         // For a TSV file with genomic coordinates, we need to specify:
         // - Sequence column (region column in our case)
         // - Begin column (not applicable for our format)

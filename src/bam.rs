@@ -10,6 +10,9 @@ use noodles_bam as bam;
 use noodles_sam as sam;
 use noodles_core;
 
+// Type alias to reduce function signature complexity
+type BamReadResult = (bam::Record, String, usize, usize, String, u8);
+
 /// Query BAM file for reads overlapping a genomic region
 /// 
 /// Returns a vector of tuples containing:
@@ -25,7 +28,7 @@ pub fn query_bam_records_for_region(
     start_pos: usize,
     end_pos: usize,
     debug: bool,
-) -> Result<Vec<(bam::Record, String, usize, usize, String, u8)>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<BamReadResult>, Box<dyn std::error::Error + Send + Sync>> {
     if debug {
         println!("    DEBUG: BAM query - file: {bam_path:?}, region: {chrom}:{start_pos}-{end_pos}");
     }
