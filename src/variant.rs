@@ -947,16 +947,16 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
         println!("        DEBUG: SA tag value: {sa_value}");
     }
 
-    // Parse the breakend alt allele to extract mate position
-    let expected_mate_pos = parse_breakend_mate_position(alt_allele);
-    if expected_mate_pos.is_none() {
+    // Parse the breakend alt allele to extract mate position and strand
+    let expected_mate_info = parse_breakend_mate_position(alt_allele);
+    if expected_mate_info.is_none() {
         if debug {
             println!("        DEBUG: Could not parse mate position from alt allele: {alt_allele}");
         }
         return false;
     }
 
-    let (expected_chrom, expected_pos) = expected_mate_pos.unwrap();
+    let (expected_chrom, expected_pos, expected_strand) = expected_mate_info.unwrap();
 
     // Parse SA tag entries (multiple entries separated by semicolons)
     for sa_entry in sa_value.split(';') {
@@ -973,20 +973,18 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
         }
 
         let sa_chrom = parts[0].trim();
-        let sa_pos = match parts[1].trim().parse::<usize>() {
-            Ok(pos) => pos,
-            Err(_) => {
-                if debug {
-                    println!("        DEBUG: Invalid SA position: {}", parts[1]);
-                }
-                continue;
+        let Ok(sa_pos) = parts[1].trim().parse::<usize>() else {
+            if debug {
+                println!("        DEBUG: Invalid SA position: {}", parts[1]);
             }
+            continue;
         };
+        let sa_strand = parts[2].trim();
         let sa_cigar = parts[3].trim();
 
         if debug {
             println!(
-                "        DEBUG: SA entry - chrom: {sa_chrom}, pos: {sa_pos}, cigar: {sa_cigar}"
+                "        DEBUG: SA entry - chrom: {sa_chrom}, pos: {sa_pos}, strand: {sa_strand}, cigar: {sa_cigar}"
             );
         }
 
@@ -995,6 +993,16 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             if debug {
                 println!(
                     "        DEBUG: Chromosome mismatch: '{sa_chrom}' != '{expected_chrom}' (case-insensitive)"
+                );
+            }
+            continue;
+        }
+
+        // Check if strands are compatible
+        if !sa_strand.starts_with(expected_strand) {
+            if debug {
+                println!(
+                    "        DEBUG: Strand mismatch: SA strand '{sa_strand}' != expected strand '{expected_strand}'"
                 );
             }
             continue;
@@ -1017,7 +1025,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             if expected_pos >= tolerant_start && expected_pos <= tolerant_end {
                 if debug {
                     println!(
-                        "        DEBUG: MATCH! Breakpoint {expected_pos} falls within SA span {span_start}-{span_end} (with {tolerance}bp tolerance: {tolerant_start}-{tolerant_end})"
+                        "        DEBUG: MATCH! Breakpoint {expected_pos} falls within SA span {span_start}-{span_end} with strand {expected_strand} (with {tolerance}bp tolerance: {tolerant_start}-{tolerant_end})"
                     );
                 }
                 return true;
@@ -1037,14 +1045,15 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
     false
 }
 
-/// Parse the mate position from a breakend alt allele string
+/// Parse the mate position and strand orientation from a breakend alt allele string
 ///
-/// Returns Some((chromosome, position)) if successfully parsed, None otherwise
-pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)> {
-    // Handle different breakend notation formats:
-    // - t[chr:pos[ (translocation)
-    // - ]chr:pos]t (translocation)
-    // - t<chr:pos> (other complex rearrangement)
+/// Returns Some((chromosome, position, `expected_strand_compatible`)) if successfully parsed, None otherwise
+/// The `expected_strand_compatible` indicates the strand orientation expected at the mate position
+pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize, char)> {
+    // Handle different breakend notation formats with their strand implications:
+    // - t[chr:pos[ (piece extending to the right, forward strand at mate)
+    // - ]chr:pos]t (piece extending to the left, reverse strand at mate)
+    // - t<chr:pos> (other complex rearrangement, forward strand assumed)
 
     // Look for bracket notation A[chr:pos[
     if let Some(bracket_start) = alt_allele.find('[')
@@ -1052,7 +1061,10 @@ pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)>
         && bracket_start != bracket_end
     {
         let mate_info = &alt_allele[bracket_start + 1..bracket_end];
-        return parse_mate_coordinate(mate_info);
+        if let Some((chrom, pos)) = parse_mate_coordinate(mate_info) {
+            // A[chr:pos[ notation - forward strand at mate position
+            return Some((chrom, pos, '+'));
+        }
     }
 
     // Look for bracket notation ]chr:pos]T
@@ -1061,7 +1073,10 @@ pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)>
         && bracket_start != bracket_end
     {
         let mate_info = &alt_allele[bracket_start + 1..bracket_end];
-        return parse_mate_coordinate(mate_info);
+        if let Some((chrom, pos)) = parse_mate_coordinate(mate_info) {
+            // ]chr:pos]t notation - reverse strand at mate position
+            return Some((chrom, pos, '-'));
+        }
     }
 
     // Handle angle bracket notation <chr:pos>
@@ -1069,7 +1084,10 @@ pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)>
         && let Some(angle_end) = alt_allele.find('>')
     {
         let mate_info = &alt_allele[angle_start + 1..angle_end];
-        return parse_mate_coordinate(mate_info);
+        if let Some((chrom, pos)) = parse_mate_coordinate(mate_info) {
+            // <chr:pos> notation - assume forward strand
+            return Some((chrom, pos, '+'));
+        }
     }
 
     None
@@ -1086,9 +1104,8 @@ fn parse_mate_coordinate(mate_info: &str) -> Option<(String, usize)> {
     let chrom = parts[0].trim().to_lowercase();
     let pos_str = parts[1].trim();
 
-    let pos = match pos_str.parse::<usize>() {
-        Ok(p) => p,
-        Err(_) => return None,
+    let Ok(pos) = pos_str.parse::<usize>() else {
+        return None;
     };
 
     Some((chrom, pos))
@@ -1242,27 +1259,27 @@ mod tests {
         // Test bracket notation with real-world coordinates
         assert_eq!(
             parse_breakend_mate_position("A[chr12:11875518["),
-            Some(("chr12".to_string(), 11875518))
+            Some(("chr12".to_string(), 11875518, '+'))
         );
         assert_eq!(
             parse_breakend_mate_position("]chr3:5000]T"),
-            Some(("chr3".to_string(), 5000))
+            Some(("chr3".to_string(), 5000, '-'))
         );
 
-        // Test uppercase chromosome names
+        // Test uppercase chromosome handling
         assert_eq!(
             parse_breakend_mate_position("A]CHR5:10443321]"),
-            Some(("chr5".to_string(), 10443321))
+            Some(("chr5".to_string(), 10443321, '-'))
         );
         assert_eq!(
             parse_breakend_mate_position("T[CHR12:11875518["),
-            Some(("chr12".to_string(), 11875518))
+            Some(("chr12".to_string(), 11875518, '+'))
         );
 
         // Test angle bracket notation
         assert_eq!(
             parse_breakend_mate_position("G<chr4:2000000>"),
-            Some(("chr4".to_string(), 2000000))
+            Some(("chr4".to_string(), 2000000, '+'))
         );
 
         // Test invalid formats
@@ -1318,8 +1335,18 @@ mod tests {
             let expected_parts: Vec<&str> = expected.split(':').collect();
             let expected_chrom = expected_parts[0].to_string();
             let expected_pos = expected_parts[1].parse::<usize>().unwrap();
+            // Determine expected strand based on bracket notation
+            let expected_strand = match alt_allele {
+                s if s.contains("[") && (s.starts_with("[") || s.ends_with("[")) => '+',
+                s if s.contains("]") && (s.starts_with("]") || s.ends_with("]")) => '-',
+                s if s.contains("<") => '+', // angle brackets default to forward
+                _ => '+',
+            };
 
-            assert_eq!(result, Some((expected_chrom, expected_pos)));
+            assert_eq!(
+                result,
+                Some((expected_chrom, expected_pos, expected_strand))
+            );
         }
 
         // Test 2: Invalid breakend notation
@@ -1438,5 +1465,56 @@ mod tests {
         // Verify spans are correctly sized
         assert_eq!(end1 - start1 + 1, 9072 + 112); // 9184 bp
         assert_eq!(end2 - start2 + 1, 1824 + 5); // 1829 bp
+    }
+
+    #[test]
+    fn test_strand_aware_breakend_parsing() {
+        // Test that breakend notation correctly identifies strand requirements
+
+        // Forward strand notation tests (A[chr:pos[ format)
+        assert_eq!(
+            parse_breakend_mate_position("A[chr12:11875518["),
+            Some(("chr12".to_string(), 11875518, '+'))
+        );
+        assert_eq!(
+            parse_breakend_mate_position("TTGTAGTA[chr1:100000["),
+            Some(("chr1".to_string(), 100000, '+'))
+        );
+
+        // Reverse strand notation tests (]chr:pos]T format)
+        assert_eq!(
+            parse_breakend_mate_position("]chr3:5000]T"),
+            Some(("chr3".to_string(), 5000, '-'))
+        );
+        assert_eq!(
+            parse_breakend_mate_position("]chr12:11875518]ACGT"),
+            Some(("chr12".to_string(), 11875518, '-'))
+        );
+
+        // Test different bracket combinations
+        assert_eq!(
+            parse_breakend_mate_position("G]chr4:2000000]"),
+            Some(("chr4".to_string(), 2000000, '-'))
+        );
+        assert_eq!(
+            parse_breakend_mate_position("[chr5:3000000[C"),
+            Some(("chr5".to_string(), 3000000, '+'))
+        );
+
+        // Test angle bracket notation (defaults to forward)
+        assert_eq!(
+            parse_breakend_mate_position("N<chr6:4000000>"),
+            Some(("chr6".to_string(), 4000000, '+'))
+        );
+
+        // Test case insensitive chromosome handling
+        assert_eq!(
+            parse_breakend_mate_position("A[CHR12:11875518["),
+            Some(("chr12".to_string(), 11875518, '+'))
+        );
+        assert_eq!(
+            parse_breakend_mate_position("]CHRX:50000000]T"),
+            Some(("chrx".to_string(), 50000000, '-'))
+        );
     }
 }
