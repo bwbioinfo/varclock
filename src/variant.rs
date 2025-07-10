@@ -994,8 +994,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
         if sa_chrom.to_lowercase() != expected_chrom.to_lowercase() {
             if debug {
                 println!(
-                    "        DEBUG: Chromosome mismatch: '{}' != '{}' (case-insensitive)",
-                    sa_chrom, expected_chrom
+                    "        DEBUG: Chromosome mismatch: '{sa_chrom}' != '{expected_chrom}' (case-insensitive)"
                 );
             }
             continue;
@@ -1411,5 +1410,33 @@ mod tests {
         // Breakpoint near the end of the span
         let breakpoint2 = real_end - 10;
         assert!(breakpoint2 >= real_start && breakpoint2 <= real_end);
+    }
+
+    #[test]
+    fn test_multiple_sa_alignments_real_example() {
+        // Test the exact multi-SA format provided by the user:
+        // SA:Z:chr13,98718353,+,9226S9072M112D11S,60,683;chr12,11882001,-,9082S1824M5D7403S,60,34;
+
+        // Test first SA alignment (chr13)
+        let span1 = calculate_reference_span_from_cigar("9226S9072M112D11S", 98718353);
+        assert_eq!(span1, Some((98718353, 98718353 + 9072 + 112 - 1))); // 98718353-98727536
+
+        // Test second SA alignment (chr12)
+        let span2 = calculate_reference_span_from_cigar("9082S1824M5D7403S", 11882001);
+        assert_eq!(span2, Some((11882001, 11882001 + 1824 + 5 - 1))); // 11882001-11883829
+
+        // Verify breakpoints would fall within these spans
+        let (start1, end1) = span1.unwrap();
+        let (start2, end2) = span2.unwrap();
+
+        // Breakpoint in first alignment
+        assert!(98720000 >= start1 && 98720000 <= end1);
+
+        // Breakpoint in second alignment
+        assert!(11882500 >= start2 && 11882500 <= end2);
+
+        // Verify spans are correctly sized
+        assert_eq!(end1 - start1 + 1, 9072 + 112); // 9184 bp
+        assert_eq!(end2 - start2 + 1, 1824 + 5); // 1829 bp
     }
 }
