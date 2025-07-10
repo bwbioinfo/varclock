@@ -990,11 +990,12 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             );
         }
 
-        // Check if chromosomes match (simple string comparison for now)
-        if sa_chrom != expected_chrom {
+        // Check if chromosomes match (case-insensitive comparison)
+        if sa_chrom.to_lowercase() != expected_chrom.to_lowercase() {
             if debug {
                 println!(
-                    "        DEBUG: Chromosome mismatch: '{sa_chrom}' != '{expected_chrom}'"
+                    "        DEBUG: Chromosome mismatch: '{}' != '{}' (case-insensitive)",
+                    sa_chrom, expected_chrom
                 );
             }
             continue;
@@ -1082,8 +1083,11 @@ fn parse_mate_coordinate(mate_info: &str) -> Option<(String, usize)> {
         return None;
     }
 
-    let chrom = parts[0].to_string();
-    let pos = match parts[1].parse::<usize>() {
+    // Handle uppercase chromosome names like CHR5 by converting to lowercase
+    let chrom = parts[0].trim().to_lowercase();
+    let pos_str = parts[1].trim();
+
+    let pos = match pos_str.parse::<usize>() {
         Ok(p) => p,
         Err(_) => return None,
     };
@@ -1246,6 +1250,16 @@ mod tests {
             Some(("chr3".to_string(), 5000))
         );
 
+        // Test uppercase chromosome names
+        assert_eq!(
+            parse_breakend_mate_position("A]CHR5:10443321]"),
+            Some(("chr5".to_string(), 10443321))
+        );
+        assert_eq!(
+            parse_breakend_mate_position("T[CHR12:11875518["),
+            Some(("chr12".to_string(), 11875518))
+        );
+
         // Test angle bracket notation
         assert_eq!(
             parse_breakend_mate_position("G<chr4:2000000>"),
@@ -1267,7 +1281,17 @@ mod tests {
         );
         assert_eq!(
             parse_mate_coordinate("chrX:50000000"),
-            Some(("chrX".to_string(), 50000000))
+            Some(("chrx".to_string(), 50000000))
+        );
+
+        // Test uppercase chromosome names
+        assert_eq!(
+            parse_mate_coordinate("CHR5:10443321"),
+            Some(("chr5".to_string(), 10443321))
+        );
+        assert_eq!(
+            parse_mate_coordinate("CHRX:50000000"),
+            Some(("chrx".to_string(), 50000000))
         );
 
         // Test invalid coordinates
@@ -1286,6 +1310,8 @@ mod tests {
             ("A[chr12:11875518[", "chr12:11875518"),
             ("]chr3:5000]T", "chr3:5000"),
             ("G<chr4:2000000>", "chr4:2000000"),
+            ("A]CHR5:10443321]", "chr5:10443321"),
+            ("T[CHRX:50000000[", "chrx:50000000"),
         ];
 
         for (alt_allele, expected) in test_cases {
