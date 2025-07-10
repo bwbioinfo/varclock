@@ -898,7 +898,8 @@ fn analyze_breakend_from_cigar(
 /// Check if the supplementary alignment (SA) tag matches the breakend variant call
 ///
 /// The SA tag contains information about chimeric alignments where parts of the same read
-/// map to different locations. For breakend variants, this indicates the read spans a breakpoint.
+/// map to different locations. For breakend variants, we check if the SA mapping span
+/// contains the breakpoint position.
 ///
 /// SA tag format: "rname,pos,strand,CIGAR,mapQ,NM;"
 /// Example: "chr12,11875518,+,1S8285M27D179S,60,192;"
@@ -981,25 +982,52 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
                 continue;
             }
         };
+        let sa_cigar = parts[3].trim();
 
         if debug {
-            println!("        DEBUG: SA entry - chrom: {sa_chrom}, pos: {sa_pos}");
+            println!(
+                "        DEBUG: SA entry - chrom: {sa_chrom}, pos: {sa_pos}, cigar: {sa_cigar}"
+            );
         }
 
-        // Check if SA tag mate position matches the expected breakend location
-        if sa_chrom == expected_chrom && sa_pos == expected_pos {
+        // Check if chromosomes match (simple string comparison for now)
+        if sa_chrom != expected_chrom {
             if debug {
-                println!("        DEBUG: SA tag matches breakend mate position!");
+                println!(
+                    "        DEBUG: Chromosome mismatch: '{sa_chrom}' != '{expected_chrom}'"
+                );
             }
-            return true;
+            continue;
         }
 
-        // Allow for some tolerance in position matching (within 50bp for complex rearrangements)
-        if sa_chrom == expected_chrom && sa_pos.abs_diff(expected_pos) <= 50 {
+        // Calculate the reference span covered by this SA alignment
+        if let Some((span_start, span_end)) = calculate_reference_span_from_cigar(sa_cigar, sa_pos)
+        {
             if debug {
-                println!("        DEBUG: SA tag matches breakend mate position within tolerance!");
+                println!(
+                    "        DEBUG: SA alignment spans reference positions {span_start}-{span_end} (breakpoint at {expected_pos})"
+                );
             }
-            return true;
+
+            // Check if the breakpoint falls within the SA alignment span with tolerance
+            let tolerance = 100; // Allow 100bp tolerance around the span
+            let tolerant_start = span_start.saturating_sub(tolerance);
+            let tolerant_end = span_end + tolerance;
+
+            if expected_pos >= tolerant_start && expected_pos <= tolerant_end {
+                if debug {
+                    println!(
+                        "        DEBUG: MATCH! Breakpoint {expected_pos} falls within SA span {span_start}-{span_end} (with {tolerance}bp tolerance: {tolerant_start}-{tolerant_end})"
+                    );
+                }
+                return true;
+            } else if debug {
+                println!(
+                    "        DEBUG: Breakpoint {expected_pos} outside SA span {span_start}-{span_end} (with tolerance {tolerant_start}-{tolerant_end})"
+                );
+            }
+        } else if debug {
+            println!("        DEBUG: Could not parse CIGAR string: {sa_cigar}");
         }
     }
 
@@ -1012,7 +1040,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
 /// Parse the mate position from a breakend alt allele string
 ///
 /// Returns Some((chromosome, position)) if successfully parsed, None otherwise
-fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)> {
+pub fn parse_breakend_mate_position(alt_allele: &str) -> Option<(String, usize)> {
     // Handle different breakend notation formats:
     // - t[chr:pos[ (translocation)
     // - ]chr:pos]t (translocation)
@@ -1061,6 +1089,64 @@ fn parse_mate_coordinate(mate_info: &str) -> Option<(String, usize)> {
     };
 
     Some((chrom, pos))
+}
+
+/// Calculate the reference span covered by a CIGAR alignment
+///
+/// Returns Some((start, end)) where start is the alignment start position
+/// and end is the last reference position covered (inclusive).
+/// Returns None if the CIGAR string is invalid.
+fn calculate_reference_span_from_cigar(
+    cigar_str: &str,
+    start_pos: usize,
+) -> Option<(usize, usize)> {
+    if cigar_str.is_empty() {
+        return Some((start_pos, start_pos.saturating_sub(1))); // No operations
+    }
+
+    let mut reference_consumed = 0;
+    let mut i = 0;
+    let cigar_bytes = cigar_str.as_bytes();
+
+    while i < cigar_bytes.len() {
+        // Parse the number
+        let mut j = i;
+        while j < cigar_bytes.len() && cigar_bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+
+        if j == i || j >= cigar_bytes.len() {
+            return None; // Invalid format
+        }
+
+        let length_str = std::str::from_utf8(&cigar_bytes[i..j]).ok()?;
+        let length = length_str.parse::<usize>().ok()?;
+
+        // Parse the operation
+        let op = cigar_bytes[j] as char;
+
+        // Check which operations consume reference
+        match op {
+            'M' | '=' | 'X' | 'D' | 'N' => {
+                // Match, sequence match, sequence mismatch, deletion, skip consume reference
+                reference_consumed += length;
+            }
+            'I' | 'S' | 'H' | 'P' => {
+                // Insertion, soft clip, hard clip, padding do not consume reference
+            }
+            _ => {
+                return None; // Unknown operation
+            }
+        }
+
+        i = j + 1;
+    }
+
+    if reference_consumed == 0 {
+        Some((start_pos, start_pos.saturating_sub(1))) // No reference consumed
+    } else {
+        Some((start_pos, start_pos + reference_consumed - 1))
+    }
 }
 
 /// Legacy function for backwards compatibility
@@ -1222,5 +1308,82 @@ mod tests {
             Some(("chr12".to_string(), 11875518))
         );
         assert_eq!(parse_mate_coordinate("invalid"), None);
+    }
+
+    #[test]
+    fn test_cigar_reference_span_calculation() {
+        // Test CIGAR string parsing for reference span calculation
+
+        // Simple match
+        assert_eq!(
+            calculate_reference_span_from_cigar("100M", 1000),
+            Some((1000, 1099))
+        );
+
+        // Complex CIGAR with insertions, deletions, and soft clipping
+        // 1S (soft clip, no ref) + 8285M (match, consumes ref) + 27D (deletion, consumes ref) + 179S (soft clip, no ref)
+        assert_eq!(
+            calculate_reference_span_from_cigar("1S8285M27D179S", 11875518),
+            Some((11875518, 11875518 + 8285 + 27 - 1))
+        );
+
+        // CIGAR with only insertions and soft clips (no reference consumption)
+        assert_eq!(
+            calculate_reference_span_from_cigar("50S100I50S", 1000),
+            Some((1000, 999)) // No reference consumed, so end < start
+        );
+
+        // CIGAR with mix of operations
+        assert_eq!(
+            calculate_reference_span_from_cigar("50M10I30M5D20M", 1000),
+            Some((1000, 1000 + 50 + 30 + 5 + 20 - 1)) // 105 total reference consumed
+        );
+
+        // Invalid CIGAR
+        assert_eq!(calculate_reference_span_from_cigar("invalid", 1000), None);
+        assert_eq!(calculate_reference_span_from_cigar("100", 1000), None); // Missing operation
+        assert_eq!(calculate_reference_span_from_cigar("M100", 1000), None); // Invalid format
+
+        // Empty CIGAR
+        assert_eq!(
+            calculate_reference_span_from_cigar("", 1000),
+            Some((1000, 999)) // No operations, so end < start
+        );
+    }
+
+    #[test]
+    fn test_breakend_span_validation() {
+        // Test that breakend validation correctly checks SA alignment spans
+
+        // Case 1: Breakpoint within SA span
+        let span = calculate_reference_span_from_cigar("100M", 1000);
+        assert_eq!(span, Some((1000, 1099)));
+
+        // Breakpoint at 1050 should be within span 1000-1099
+        let breakpoint = 1050;
+        let (start, end) = span.unwrap();
+        let tolerance = 100;
+        assert!(breakpoint >= start.saturating_sub(tolerance) && breakpoint <= end + tolerance);
+
+        // Case 2: Breakpoint outside SA span but within tolerance
+        let breakpoint = 1150; // 51bp after end of span
+        assert!(breakpoint >= start.saturating_sub(tolerance) && breakpoint <= end + tolerance);
+
+        // Case 3: Breakpoint outside SA span and tolerance
+        let breakpoint = 1250; // 151bp after end of span
+        assert!(!(breakpoint >= start.saturating_sub(tolerance) && breakpoint <= end + tolerance));
+
+        // Case 4: Complex CIGAR example from real data
+        let real_span = calculate_reference_span_from_cigar("1S8285M27D179S", 11875518);
+        assert_eq!(real_span, Some((11875518, 11875518 + 8285 + 27 - 1)));
+
+        let (real_start, real_end) = real_span.unwrap();
+        // Breakpoint near the beginning of the span
+        let breakpoint1 = 11875520;
+        assert!(breakpoint1 >= real_start && breakpoint1 <= real_end);
+
+        // Breakpoint near the end of the span
+        let breakpoint2 = real_end - 10;
+        assert!(breakpoint2 >= real_start && breakpoint2 <= real_end);
     }
 }
