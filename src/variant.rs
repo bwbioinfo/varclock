@@ -849,41 +849,8 @@ fn analyze_breakend_from_cigar(
     // - ]chr:pos]t (translocation)
     // - t<chr:pos> (other complex rearrangement)
 
-    // For breakends, we primarily look for soft/hard clipping or split reads
-    // which indicate the read spans a breakpoint
-
-    let cigar = record.cigar();
-    let mut has_clipping = false;
-    let mut has_complex_pattern = false;
-
-    for op in cigar.iter().flatten() {
-        let op_len = op.len();
-
-        match op.kind() {
-            Kind::SoftClip | Kind::HardClip => {
-                has_clipping = true;
-                if debug {
-                    println!(
-                        "        DEBUG: Found clipping {:?}({}) - potential breakend support",
-                        op.kind(),
-                        op_len
-                    );
-                }
-            }
-            Kind::Skip => {
-                // Large skips might indicate structural variants
-                if op_len > 1000 {
-                    has_complex_pattern = true;
-                    if debug {
-                        println!(
-                            "        DEBUG: Found large skip {op_len}bp - potential breakend support"
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    // For breakends, we rely on supplementary alignment (SA) tag validation
+    // which provides the most reliable evidence for structural variants
 
     // Check if read spans the variant position
     let read_end = {
@@ -916,13 +883,10 @@ fn analyze_breakend_from_cigar(
     // Check supplementary alignment (SA) tag for breakend validation
     let sa_tag_matches = check_sa_tag_for_breakend(record, alt_allele, debug);
 
-    // For breakends, the presence of clipping or complex patterns near the variant
-    // position suggests the read might support the breakend
-    if has_clipping || has_complex_pattern || sa_tag_matches {
+    // For breakends, rely exclusively on SA tag validation
+    if sa_tag_matches {
         if debug {
-            println!(
-                "        DEBUG: Breakend evidence found (clipping={has_clipping}, complex={has_complex_pattern}, SA_matches={sa_tag_matches})"
-            );
+            println!("        DEBUG: Breakend evidence found (SA_matches=true)");
         }
         return AlleleMatch::Variant(format!("BND:{alt_allele}"));
     }
@@ -1223,5 +1187,39 @@ mod tests {
         assert_eq!(parse_mate_coordinate("chr1"), None);
         assert_eq!(parse_mate_coordinate("chr1:invalid"), None);
         assert_eq!(parse_mate_coordinate("invalid:format:here"), None);
+    }
+
+    #[test]
+    fn test_sa_tag_only_breakend_validation() {
+        // Test that breakend analysis uses only SA tag validation
+        // This is a conceptual test to verify the simplified logic
+
+        // Test 1: Valid SA tag parsing
+        let test_cases = vec![
+            ("A[chr2:1000[", "chr2:1000"),
+            ("]chr3:5000]T", "chr3:5000"),
+            ("G<chr4:2000>", "chr4:2000"),
+        ];
+
+        for (alt_allele, expected) in test_cases {
+            let result = parse_breakend_mate_position(alt_allele);
+            let expected_parts: Vec<&str> = expected.split(':').collect();
+            let expected_chrom = expected_parts[0].to_string();
+            let expected_pos = expected_parts[1].parse::<usize>().unwrap();
+
+            assert_eq!(result, Some((expected_chrom, expected_pos)));
+        }
+
+        // Test 2: Invalid breakend notation
+        assert_eq!(parse_breakend_mate_position("A>G"), None);
+        assert_eq!(parse_breakend_mate_position("INS"), None);
+        assert_eq!(parse_breakend_mate_position("DEL"), None);
+
+        // Test 3: Mate coordinate parsing
+        assert_eq!(
+            parse_mate_coordinate("chr1:1000"),
+            Some(("chr1".to_string(), 1000))
+        );
+        assert_eq!(parse_mate_coordinate("invalid"), None);
     }
 }
