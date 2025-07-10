@@ -900,7 +900,8 @@ fn analyze_breakend_from_cigar(
 /// The SA tag contains information about chimeric alignments where parts of the same read
 /// map to different locations. For breakend variants, this indicates the read spans a breakpoint.
 ///
-/// SA tag format: "rname,pos,strand,CIGAR,mapQ,NM"
+/// SA tag format: "rname,pos,strand,CIGAR,mapQ,NM;"
+/// Example: "chr12,11875518,+,1S8285M27D179S,60,192;"
 /// Multiple SA entries are separated by semicolons.
 fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool) -> bool {
     use noodles_sam::alignment::record::data::field::Tag;
@@ -970,8 +971,8 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             continue;
         }
 
-        let sa_chrom = parts[0];
-        let sa_pos = match parts[1].parse::<usize>() {
+        let sa_chrom = parts[0].trim();
+        let sa_pos = match parts[1].trim().parse::<usize>() {
             Ok(pos) => pos,
             Err(_) => {
                 if debug {
@@ -993,8 +994,8 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             return true;
         }
 
-        // Allow for some tolerance in position matching (within 10bp)
-        if sa_chrom == expected_chrom && sa_pos.abs_diff(expected_pos) <= 10 {
+        // Allow for some tolerance in position matching (within 50bp for complex rearrangements)
+        if sa_chrom == expected_chrom && sa_pos.abs_diff(expected_pos) <= 50 {
             if debug {
                 println!("        DEBUG: SA tag matches breakend mate position within tolerance!");
             }
@@ -1149,10 +1150,10 @@ mod tests {
 
     #[test]
     fn test_parse_breakend_mate_position() {
-        // Test bracket notation
+        // Test bracket notation with real-world coordinates
         assert_eq!(
-            parse_breakend_mate_position("A[chr2:1000["),
-            Some(("chr2".to_string(), 1000))
+            parse_breakend_mate_position("A[chr12:11875518["),
+            Some(("chr12".to_string(), 11875518))
         );
         assert_eq!(
             parse_breakend_mate_position("]chr3:5000]T"),
@@ -1161,8 +1162,8 @@ mod tests {
 
         // Test angle bracket notation
         assert_eq!(
-            parse_breakend_mate_position("G<chr4:2000>"),
-            Some(("chr4".to_string(), 2000))
+            parse_breakend_mate_position("G<chr4:2000000>"),
+            Some(("chr4".to_string(), 2000000))
         );
 
         // Test invalid formats
@@ -1173,14 +1174,14 @@ mod tests {
 
     #[test]
     fn test_parse_mate_coordinate() {
-        // Test valid coordinates
+        // Test valid coordinates with real-world values
         assert_eq!(
-            parse_mate_coordinate("chr1:1000"),
-            Some(("chr1".to_string(), 1000))
+            parse_mate_coordinate("chr12:11875518"),
+            Some(("chr12".to_string(), 11875518))
         );
         assert_eq!(
-            parse_mate_coordinate("chrX:50000"),
-            Some(("chrX".to_string(), 50000))
+            parse_mate_coordinate("chrX:50000000"),
+            Some(("chrX".to_string(), 50000000))
         );
 
         // Test invalid coordinates
@@ -1194,11 +1195,11 @@ mod tests {
         // Test that breakend analysis uses only SA tag validation
         // This is a conceptual test to verify the simplified logic
 
-        // Test 1: Valid SA tag parsing
+        // Test 1: Valid SA tag parsing with real-world coordinates
         let test_cases = vec![
-            ("A[chr2:1000[", "chr2:1000"),
+            ("A[chr12:11875518[", "chr12:11875518"),
             ("]chr3:5000]T", "chr3:5000"),
-            ("G<chr4:2000>", "chr4:2000"),
+            ("G<chr4:2000000>", "chr4:2000000"),
         ];
 
         for (alt_allele, expected) in test_cases {
@@ -1215,10 +1216,10 @@ mod tests {
         assert_eq!(parse_breakend_mate_position("INS"), None);
         assert_eq!(parse_breakend_mate_position("DEL"), None);
 
-        // Test 3: Mate coordinate parsing
+        // Test 3: Mate coordinate parsing with real-world coordinates
         assert_eq!(
-            parse_mate_coordinate("chr1:1000"),
-            Some(("chr1".to_string(), 1000))
+            parse_mate_coordinate("chr12:11875518"),
+            Some(("chr12".to_string(), 11875518))
         );
         assert_eq!(parse_mate_coordinate("invalid"), None);
     }
