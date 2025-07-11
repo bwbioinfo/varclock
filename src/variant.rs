@@ -911,7 +911,7 @@ fn analyze_breakend_from_cigar(
             if debug {
                 println!("        DEBUG: SA tag present but doesn't match breakend");
             }
-            AlleleMatch::Other("OTVAR".to_string())
+            AlleleMatch::Other("OTHER_BND".to_string())
         }
         SaTagStatus::NotPresent => {
             if debug {
