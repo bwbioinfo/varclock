@@ -1224,8 +1224,12 @@ fn validate_strand_aware_breakpoint(
 ///
 /// Returns Some((start, end)) where start is the alignment start position
 /// and end is the last reference position covered (inclusive).
-/// For reverse strand alignments, the span calculation accounts for the fact
-/// that the CIGAR operations are relative to the reverse-complemented sequence.
+///
+/// NOTE: The current implementation treats forward and reverse strand alignments
+/// the same way for span calculation. The strand parameter is preserved for
+/// future enhancement when the specific requirements for reverse strand
+/// span calculation are clarified.
+///
 /// Returns None if the CIGAR string is invalid.
 fn calculate_reference_span_from_cigar_with_strand(
     cigar_str: &str,
@@ -1277,9 +1281,9 @@ fn calculate_reference_span_from_cigar_with_strand(
     if reference_consumed == 0 {
         Some((start_pos, start_pos.saturating_sub(1))) // No reference consumed
     } else {
-        // For both forward and reverse strand alignments, the position represents the leftmost
-        // coordinate on the reference. The CIGAR operations consume reference bases from left to right.
-        // Strand-specific breakpoint validation logic is handled separately.
+        // TODO: Implement proper reverse strand span calculation
+        // Current implementation uses standard left-to-right calculation for both strands
+        // This may need to be modified based on specific requirements for reverse strand handling
         Some((start_pos, start_pos + reference_consumed - 1))
     }
 }
@@ -1664,7 +1668,8 @@ mod tests {
             Some((11875518, 11875518 + 8285 + 27 - 1))
         );
 
-        // Same CIGAR with reverse strand
+        // Same CIGAR with reverse strand - currently uses same calculation
+        // TODO: Implement proper reverse strand calculation when requirements are clarified
         assert_eq!(
             calculate_reference_span_from_cigar_with_strand("1S8285M27D179S", 11875518, "-"),
             Some((11875518, 11875518 + 8285 + 27 - 1))
@@ -1675,9 +1680,21 @@ mod tests {
             calculate_reference_span_from_cigar_with_strand("50M10I30M5D20M", 1000, "+"),
             Some((1000, 1000 + 50 + 30 + 5 + 20 - 1))
         );
+        // Currently same calculation for reverse strand
         assert_eq!(
             calculate_reference_span_from_cigar_with_strand("50M10I30M5D20M", 1000, "-"),
             Some((1000, 1000 + 50 + 30 + 5 + 20 - 1))
+        );
+
+        // Test simpler CIGAR
+        assert_eq!(
+            calculate_reference_span_from_cigar_with_strand("10S50M5D", 1000, "+"),
+            Some((1000, 1000 + 50 + 5 - 1))
+        );
+        // Currently same calculation for reverse strand
+        assert_eq!(
+            calculate_reference_span_from_cigar_with_strand("10S50M5D", 1000, "-"),
+            Some((1000, 1000 + 50 + 5 - 1))
         );
     }
 
