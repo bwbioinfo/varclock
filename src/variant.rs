@@ -956,7 +956,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
         return false;
     }
 
-    let (expected_chrom, expected_pos, expected_strand) = expected_mate_info.unwrap();
+    let (expected_chrom, expected_pos, _expected_strand) = expected_mate_info.unwrap();
 
     // Parse SA tag entries (multiple entries separated by semicolons)
     for sa_entry in sa_value.split(';') {
@@ -998,16 +998,6 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             continue;
         }
 
-        // Check if strands are compatible
-        if !sa_strand.starts_with(expected_strand) {
-            if debug {
-                println!(
-                    "        DEBUG: Strand mismatch: SA strand '{sa_strand}' != expected strand '{expected_strand}'"
-                );
-            }
-            continue;
-        }
-
         // Calculate the reference span covered by this SA alignment with strand awareness
         if let Some((span_start, span_end)) =
             calculate_reference_span_from_cigar_with_strand(sa_cigar, sa_pos, sa_strand)
@@ -1018,26 +1008,21 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
                 );
             }
 
-            // Perform strand-aware breakpoint validation
-            let is_valid_breakpoint = validate_strand_aware_breakpoint(
-                expected_pos,
-                expected_strand,
-                sa_strand.chars().next().unwrap_or('+'),
-                span_start,
-                span_end,
-                debug,
-            );
+            // Check if the breakpoint falls within the SA alignment span with tolerance
+            let tolerance = 100; // Allow 100bp tolerance around the span
+            let tolerant_start = span_start.saturating_sub(tolerance);
+            let tolerant_end = span_end + tolerance;
 
-            if is_valid_breakpoint {
+            if expected_pos >= tolerant_start && expected_pos <= tolerant_end {
                 if debug {
                     println!(
-                        "        DEBUG: MATCH! Strand-aware validation passed for breakpoint {expected_pos} with SA span {span_start}-{span_end} (expected strand: {expected_strand}, SA strand: {sa_strand})"
+                        "        DEBUG: MATCH! Breakpoint {expected_pos} falls within SA span {span_start}-{span_end} (with {tolerance}bp tolerance: {tolerant_start}-{tolerant_end})"
                     );
                 }
                 return true;
             } else if debug {
                 println!(
-                    "        DEBUG: Strand-aware validation failed for breakpoint {expected_pos} with SA span {span_start}-{span_end} (expected strand: {expected_strand}, SA strand: {sa_strand})"
+                    "        DEBUG: Breakpoint {expected_pos} outside SA span {span_start}-{span_end} (with tolerance {tolerant_start}-{tolerant_end})"
                 );
             }
         } else if debug {
@@ -1115,109 +1100,6 @@ fn parse_mate_coordinate(mate_info: &str) -> Option<(String, usize)> {
     };
 
     Some((chrom, pos))
-}
-
-/// Validate breakpoint position considering strand orientation
-///
-/// For breakends, the strand information affects which part of the SA alignment
-/// is relevant for validation:
-/// - Forward strand breakends typically correspond to the start/end of forward SA alignments
-/// - Reverse strand breakends may have different positional relationships with reverse SA alignments
-fn validate_strand_aware_breakpoint(
-    expected_pos: usize,
-    expected_strand: char,
-    sa_strand: char,
-    span_start: usize,
-    span_end: usize,
-    debug: bool,
-) -> bool {
-    let tolerance = 100; // Allow 100bp tolerance
-
-    // Basic span check with tolerance (always required)
-    let tolerant_start = span_start.saturating_sub(tolerance);
-    let tolerant_end = span_end + tolerance;
-    let within_tolerant_span = expected_pos >= tolerant_start && expected_pos <= tolerant_end;
-
-    if debug {
-        println!(
-            "        DEBUG: Basic span check: {expected_pos} in range {tolerant_start}-{tolerant_end}: {within_tolerant_span}"
-        );
-    }
-
-    if !within_tolerant_span {
-        return false;
-    }
-
-    // Additional strand-specific validation
-    match (expected_strand, sa_strand) {
-        ('+', '+') => {
-            // Forward strand breakend with forward strand SA alignment
-            // Breakpoint should be near the boundaries of the alignment
-            let near_start = expected_pos.abs_diff(span_start) <= tolerance;
-            let near_end = expected_pos.abs_diff(span_end) <= tolerance;
-            let within_span = expected_pos >= span_start && expected_pos <= span_end;
-
-            if debug {
-                println!(
-                    "        DEBUG: Forward/Forward - near_start: {near_start}, near_end: {near_end}, within_span: {within_span}"
-                );
-            }
-
-            near_start || near_end || within_span
-        }
-        ('-', '-') => {
-            // Reverse strand breakend with reverse strand SA alignment
-            // For reverse strand, the breakpoint relationship may be different
-            let near_start = expected_pos.abs_diff(span_start) <= tolerance;
-            let near_end = expected_pos.abs_diff(span_end) <= tolerance;
-            let within_span = expected_pos >= span_start && expected_pos <= span_end;
-
-            if debug {
-                println!(
-                    "        DEBUG: Reverse/Reverse - near_start: {near_start}, near_end: {near_end}, within_span: {within_span}"
-                );
-            }
-
-            near_start || near_end || within_span
-        }
-        ('+', '-') => {
-            // Forward strand breakend with reverse strand SA alignment
-            // This may indicate a more complex rearrangement
-            // For now, use relaxed validation but this could be made more stringent
-            let within_extended_span =
-                expected_pos >= tolerant_start && expected_pos <= tolerant_end;
-
-            if debug {
-                println!(
-                    "        DEBUG: Forward/Reverse - using relaxed validation: {within_extended_span}"
-                );
-            }
-
-            within_extended_span
-        }
-        ('-', '+') => {
-            // Reverse strand breakend with forward strand SA alignment
-            // This may indicate a more complex rearrangement
-            // For now, use relaxed validation but this could be made more stringent
-            let within_extended_span =
-                expected_pos >= tolerant_start && expected_pos <= tolerant_end;
-
-            if debug {
-                println!(
-                    "        DEBUG: Reverse/Forward - using relaxed validation: {within_extended_span}"
-                );
-            }
-
-            within_extended_span
-        }
-        _ => {
-            // Unknown strand combination, fall back to basic span check
-            if debug {
-                println!("        DEBUG: Unknown strand combination, using basic span check");
-            }
-            within_tolerant_span
-        }
-    }
 }
 
 /// Calculate the reference span covered by a CIGAR alignment with strand awareness
@@ -1696,56 +1578,5 @@ mod tests {
             calculate_reference_span_from_cigar_with_strand("10S50M5D", 1000, "-"),
             Some((1000, 1000 + 50 + 5 - 1))
         );
-    }
-
-    #[test]
-    fn test_strand_aware_breakpoint_validation() {
-        // Test strand-aware breakpoint validation logic
-
-        // Forward strand breakend with forward strand SA - should match at boundaries
-        assert!(validate_strand_aware_breakpoint(
-            1000, '+', '+', 1000, 1099, false
-        )); // At start
-        assert!(validate_strand_aware_breakpoint(
-            1099, '+', '+', 1000, 1099, false
-        )); // At end
-        assert!(validate_strand_aware_breakpoint(
-            1050, '+', '+', 1000, 1099, false
-        )); // Within span
-
-        // Reverse strand breakend with reverse strand SA - should match at boundaries
-        assert!(validate_strand_aware_breakpoint(
-            1000, '-', '-', 1000, 1099, false
-        )); // At start
-        assert!(validate_strand_aware_breakpoint(
-            1099, '-', '-', 1000, 1099, false
-        )); // At end
-        assert!(validate_strand_aware_breakpoint(
-            1050, '-', '-', 1000, 1099, false
-        )); // Within span
-
-        // Cross-strand combinations - more relaxed validation
-        assert!(validate_strand_aware_breakpoint(
-            1050, '+', '-', 1000, 1099, false
-        ));
-        assert!(validate_strand_aware_breakpoint(
-            1050, '-', '+', 1000, 1099, false
-        ));
-
-        // Outside tolerance should fail
-        assert!(!validate_strand_aware_breakpoint(
-            1300, '+', '+', 1000, 1099, false
-        )); // Too far
-        assert!(!validate_strand_aware_breakpoint(
-            700, '+', '+', 1000, 1099, false
-        )); // Too far
-
-        // Within tolerance but outside exact span
-        assert!(validate_strand_aware_breakpoint(
-            950, '+', '+', 1000, 1099, false
-        )); // Within tolerance
-        assert!(validate_strand_aware_breakpoint(
-            1150, '+', '+', 1000, 1099, false
-        )); // Within tolerance
     }
 }
