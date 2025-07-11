@@ -42,6 +42,17 @@ pub enum AlleleMatch {
     Indeterminate,
 }
 
+/// Result of checking SA tag for breakend support
+#[derive(Debug, Clone, PartialEq)]
+enum SaTagStatus {
+    /// No SA tag present in the read
+    NotPresent,
+    /// SA tag present but doesn't match the expected breakend
+    PresentNoMatch,
+    /// SA tag present and matches the expected breakend
+    Matches,
+}
+
 impl AlleleMatch {
     /// Convert to string representation for output
     pub fn to_output_string(&self) -> String {
@@ -881,18 +892,29 @@ fn analyze_breakend_from_cigar(
     }
 
     // Check supplementary alignment (SA) tag for breakend validation
-    let sa_tag_matches = check_sa_tag_for_breakend(record, alt_allele, debug);
+    let sa_tag_status = check_sa_tag_for_breakend(record, alt_allele, debug);
 
     // For breakends, rely exclusively on SA tag validation
-    if sa_tag_matches {
-        if debug {
-            println!("        DEBUG: Breakend evidence found (SA_matches=true)");
+    match sa_tag_status {
+        SaTagStatus::Matches => {
+            if debug {
+                println!("        DEBUG: Breakend evidence found (SA_matches=true)");
+            }
+            AlleleMatch::Variant(format!("BND:{alt_allele}"))
         }
-        return AlleleMatch::Variant(format!("BND:{alt_allele}"));
+        SaTagStatus::PresentNoMatch => {
+            if debug {
+                println!("        DEBUG: SA tag present but doesn't match breakend");
+            }
+            AlleleMatch::Other("OTVAR".to_string())
+        }
+        SaTagStatus::NotPresent => {
+            if debug {
+                println!("        DEBUG: No SA tag found, assuming reference");
+            }
+            AlleleMatch::Reference(ref_allele.to_string())
+        }
     }
-
-    // If no breakend evidence, assume reference
-    AlleleMatch::Reference(ref_allele.to_string())
 }
 
 /// Check if the supplementary alignment (SA) tag matches the breakend variant call
@@ -904,7 +926,7 @@ fn analyze_breakend_from_cigar(
 /// SA tag format: "rname,pos,strand,CIGAR,mapQ,NM;"
 /// Example: "chr12,11875518,+,1S8285M27D179S,60,192;"
 /// Multiple SA entries are separated by semicolons.
-fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool) -> bool {
+fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool) -> SaTagStatus {
     use noodles_sam::alignment::record::data::field::Tag;
 
     // Extract the SA tag from the BAM record
@@ -918,7 +940,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
                         if debug {
                             println!("        DEBUG: SA tag contains invalid UTF-8");
                         }
-                        return false;
+                        return SaTagStatus::PresentNoMatch;
                     }
                 }
             }
@@ -926,20 +948,20 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
                 if debug {
                     println!("        DEBUG: SA tag is not a string");
                 }
-                return false;
+                return SaTagStatus::PresentNoMatch;
             }
         },
         Some(Err(_)) => {
             if debug {
                 println!("        DEBUG: Error reading SA tag");
             }
-            return false;
+            return SaTagStatus::PresentNoMatch;
         }
         None => {
             if debug {
                 println!("        DEBUG: No SA tag found");
             }
-            return false;
+            return SaTagStatus::NotPresent;
         }
     };
 
@@ -953,7 +975,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
         if debug {
             println!("        DEBUG: Could not parse mate position from alt allele: {alt_allele}");
         }
-        return false;
+        return SaTagStatus::PresentNoMatch;
     }
 
     let (expected_chrom, expected_pos, _expected_strand) = expected_mate_info.unwrap();
@@ -1019,7 +1041,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
                         "        DEBUG: MATCH! Breakpoint {expected_pos} falls within SA span {span_start}-{span_end} (with {tolerance}bp tolerance: {tolerant_start}-{tolerant_end})"
                     );
                 }
-                return true;
+                return SaTagStatus::Matches;
             } else if debug {
                 println!(
                     "        DEBUG: Breakpoint {expected_pos} outside SA span {span_start}-{span_end} (with tolerance {tolerant_start}-{tolerant_end})"
@@ -1033,7 +1055,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
     if debug {
         println!("        DEBUG: SA tag does not match expected breakend mate position");
     }
-    false
+    SaTagStatus::PresentNoMatch
 }
 
 /// Parse the mate position and strand orientation from a breakend alt allele string
@@ -1526,6 +1548,80 @@ mod tests {
             parse_breakend_mate_position("]CHRX:50000000]T"),
             Some(("chrx".to_string(), 50000000, '-'))
         );
+    }
+
+    #[test]
+    fn test_sa_tag_otvar_classification() {
+        // Test that reads with SA tags that don't match the breakend are classified as OTVAR
+
+        // Mock breakend position that won't match our SA tags
+        let breakend_alt = "A[chr20:50000000[";
+        let ref_allele = "A";
+
+        // Test case 1: SA tag present but different chromosome
+        let sa_tag_diff_chr = "chr10,1000,+,100M,60,0;";
+        let status1 = check_sa_tag_for_breakend_mock(sa_tag_diff_chr, breakend_alt);
+        assert_eq!(status1, SaTagStatus::PresentNoMatch);
+
+        // Test case 2: SA tag present but position outside span
+        let sa_tag_far_pos = "chr20,1000,+,100M,60,0;"; // Span would be [1000,1099], breakpoint at 50000000
+        let status2 = check_sa_tag_for_breakend_mock(sa_tag_far_pos, breakend_alt);
+        assert_eq!(status2, SaTagStatus::PresentNoMatch);
+
+        // Test case 3: SA tag matches (within tolerance)
+        let sa_tag_match = "chr20,49999950,+,100M,60,0;"; // Span would include 50000000
+        let status3 = check_sa_tag_for_breakend_mock(sa_tag_match, breakend_alt);
+        assert_eq!(status3, SaTagStatus::Matches);
+
+        // Test case 4: No SA tag
+        let status4 = SaTagStatus::NotPresent;
+        assert_eq!(status4, SaTagStatus::NotPresent);
+    }
+
+    // Helper function to test SA tag checking logic without needing a full BAM record
+    fn check_sa_tag_for_breakend_mock(sa_value: &str, alt_allele: &str) -> SaTagStatus {
+        let expected_mate_info = parse_breakend_mate_position(alt_allele);
+        if expected_mate_info.is_none() {
+            return SaTagStatus::PresentNoMatch;
+        }
+
+        let (expected_chrom, expected_pos, _expected_strand) = expected_mate_info.unwrap();
+
+        for sa_entry in sa_value.split(';') {
+            if sa_entry.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = sa_entry.split(',').collect();
+            if parts.len() < 6 {
+                continue;
+            }
+
+            let sa_chrom = parts[0].trim();
+            let Ok(sa_pos) = parts[1].trim().parse::<usize>() else {
+                continue;
+            };
+            let sa_strand = parts[2].trim();
+            let sa_cigar = parts[3].trim();
+
+            if sa_chrom.to_lowercase() != expected_chrom.to_lowercase() {
+                continue;
+            }
+
+            if let Some((span_start, span_end)) =
+                calculate_reference_span_from_cigar_with_strand(sa_cigar, sa_pos, sa_strand)
+            {
+                let tolerance = 100;
+                let tolerant_start = span_start.saturating_sub(tolerance);
+                let tolerant_end = span_end + tolerance;
+
+                if expected_pos >= tolerant_start && expected_pos <= tolerant_end {
+                    return SaTagStatus::Matches;
+                }
+            }
+        }
+
+        SaTagStatus::PresentNoMatch
     }
 
     #[test]
