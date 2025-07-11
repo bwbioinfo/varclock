@@ -1000,7 +1000,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
 
         // Calculate the reference span covered by this SA alignment with strand awareness
         if let Some((span_start, span_end)) =
-            calculate_reference_span_from_cigar_with_strand(sa_cigar, sa_pos, sa_strand)
+            calculate_reference_span_from_cigar_with_strand(sa_cigar, sa_pos)
         {
             if debug {
                 println!(
@@ -1116,7 +1116,6 @@ fn parse_mate_coordinate(mate_info: &str) -> Option<(String, usize)> {
 fn calculate_reference_span_from_cigar_with_strand(
     cigar_str: &str,
     start_pos: usize,
-    strand: &str,
 ) -> Option<(usize, usize)> {
     if cigar_str.is_empty() {
         return Some((start_pos, start_pos.saturating_sub(1))); // No operations
@@ -1145,11 +1144,11 @@ fn calculate_reference_span_from_cigar_with_strand(
 
         // Check which operations consume reference
         match op {
-            'M' | '=' | 'X' | 'D' | 'N' => {
+            'M' | '=' | 'X' | 'N' => {
                 // Match, sequence match, sequence mismatch, deletion, skip consume reference
                 reference_consumed += length;
             }
-            'I' | 'S' | 'H' | 'P' => {
+            'I' | 'D' | 'S' | 'H' | 'P' => {
                 // Insertion, soft clip, hard clip, padding do not consume reference
             }
             _ => {
@@ -1164,22 +1163,12 @@ fn calculate_reference_span_from_cigar_with_strand(
         Some((start_pos, start_pos.saturating_sub(1))) // No reference consumed
     } else {
         // Calculate span based on strand orientation
-        if strand == "-" {
-            // For negative strand alignments:
-            // - The position in SA tag represents the rightmost coordinate of the alignment
-            // - We calculate backwards from this position
-            // - The span extends from (start_pos - reference_consumed + 1) to start_pos
-            let span_start = start_pos.saturating_sub(reference_consumed - 1);
-            let span_end = start_pos;
-            Some((span_start, span_end))
-        } else {
-            // For forward strand alignments (default):
-            // - The position in SA tag represents the leftmost coordinate
-            // - The span extends from start_pos to (start_pos + reference_consumed - 1)
-            let span_start = start_pos;
-            let span_end = start_pos + reference_consumed - 1;
-            Some((span_start, span_end))
-        }
+        // For forward strand alignments (default):
+        // - The position in SA tag represents the leftmost coordinate
+        // - The span extends from start_pos to (start_pos + reference_consumed - 1)
+        let span_start = start_pos;
+        let span_end = start_pos + reference_consumed - 1;
+        Some((span_start, span_end))
     }
 }
 
