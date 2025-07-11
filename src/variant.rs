@@ -1144,11 +1144,11 @@ fn calculate_reference_span_from_cigar_with_strand(
 
         // Check which operations consume reference
         match op {
-            'M' | '=' | 'X' | 'N' => {
+            'M' | '=' | 'X' | 'N' | 'I' | 'D' => {
                 // Match, sequence match, sequence mismatch, deletion, skip consume reference
                 reference_consumed += length;
             }
-            'I' | 'D' | 'S' | 'H' | 'P' => {
+            'S' | 'H' | 'P' => {
                 // Insertion, soft clip, hard clip, padding do not consume reference
             }
             _ => {
