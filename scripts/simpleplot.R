@@ -1,115 +1,156 @@
 #!/usr/bin/env Rscript
 
-library(ggplot2)
-library(readr)
-library(dplyr)
-library(optparse)
+suppressPackageStartupMessages({
+  library(optparse)
+  library(marquee)
+  library(lubridate)
+  library(patchwork)
+  library(glue)
+  library(magrittr)
+  library(dplyr)
+  library(ggplot2)
+  library(readr)
+  library(stringr)
+  library(purrr)
+})
 
-# Define command line options
+# Define options
 option_list <- list(
-  make_option(c("-i", "--input"),
-    type = "character", default = NULL,
-    help = "Input TSV file path [required]", metavar = "FILE"
-  ),
-  make_option(c("-o", "--output"),
-    type = "character", default = "variant_plot.png",
-    help = "Output plot file path [default: %default]", metavar = "FILE"
-  ),
-  make_option(c("-t", "--title"),
-    type = "character", default = "Variant-supporting Reads Over Time",
-    help = "Plot title [default: %default]", metavar = "STRING"
-  ),
-  make_option(c("-w", "--width"),
-    type = "integer", default = 10,
-    help = "Plot width in inches [default: %default]", metavar = "INTEGER"
-  ),
-  make_option(c("-v", "--height"),
-    type = "integer", default = 6,
-    help = "Plot height in inches [default: %default]", metavar = "INTEGER"
-  ),
-  make_option(c("-b", "--binwidth"),
-    type = "numeric", default = 60,
-    help = "Histogram bin width in seconds [default: %default]", metavar = "NUMERIC"
-  ),
-  make_option("--dpi",
-    type = "integer", default = 300,
-    help = "Plot resolution in DPI [default: %default]", metavar = "INTEGER"
-  )
+  make_option(c("-i", "--input"), type = "character", help = "Path to input TSV file", metavar = "FILE")
 )
 
-# Parse command line arguments
-opt_parser <- OptionParser(
-  usage = "Usage: %prog -i INPUT_FILE [OPTIONS]",
-  description = "Create a histogram plot of variant-supporting reads over time from VarClock output",
-  option_list = option_list,
-  epilogue = "Example: Rscript simpleplot.R -i output.tsv -o my_plot.png -t 'My Variants' -w 12 -h 8"
-)
-
+opt_parser <- OptionParser(option_list = option_list)
 opt <- parse_args(opt_parser)
 
-# Check if input file is specified
 if (is.null(opt$input)) {
   print_help(opt_parser)
-  stop("Input file (-i/--input) is required", call. = FALSE)
+  stop("Error: input file is required.", call. = FALSE)
 }
 
-# Check if input file exists
-if (!file.exists(opt$input)) {
-  stop(paste("Input file does not exist:", opt$input), call. = FALSE)
-}
+varclock_results <- opt$input
 
-cat("Reading data from:", opt$input, "\n")
+# Load and prepare data
+df <- readr::read_tsv(varclock_results, col_types = readr::cols(.default = "c")) %>%
+  mutate(
+    timestamp = ymd_hms(timestamp, tz = "UTC"),
+    contains_variant = stringr::str_starts(allele_match, "VARIANT"),
+    var_region = paste0(variant_description, " @ ", variant_pos),
+    support = ifelse(contains_variant, "variant", "reference")
+  )
 
-# Load data
-df <- read_tsv(opt$input)
+# Aggregate + cumulative sum
+agg_cum <- df %>%
+  group_by(timestamp, var_region, region_name, support) %>%
+  summarise(reads = n(), .groups = "drop") %>%
+  arrange(var_region, region_name, support, timestamp) %>%
+  group_by(var_region, region_name, support) %>%
+  mutate(cumulative_reads = cumsum(reads)) %>%
+  ungroup()
 
-# Check if required columns exist
-required_cols <- c("timestamp", "contains_variant", "variant_type")
-missing_cols <- required_cols[!required_cols %in% colnames(df)]
-if (length(missing_cols) > 0) {
-  stop(paste("Missing required columns:", paste(missing_cols, collapse = ", ")), call. = FALSE)
-}
+# Compute global time range
+global_time_min <- min(agg_cum$timestamp, na.rm = TRUE)
+global_time_max <- max(agg_cum$timestamp, na.rm = TRUE)
 
-# Convert timestamp to POSIXct (handle different timestamp formats)
-df <- df %>%
-  mutate(timestamp = case_when(
-    timestamp == "NA" ~ as.POSIXct(NA),
-    TRUE ~ as.POSIXct(timestamp, format = "%Y-%m-%dT%H:%M:%OS", tz = "UTC")
-  ))
+# Add a relative time column in hours
+agg_cum <- agg_cum %>%
+  mutate(rel_time_hours = as.numeric(difftime(timestamp, global_time_min, units = "hours")))
 
-# Filter for reads that contain the variant
-df_variant <- df %>% filter(contains_variant == TRUE | contains_variant == "true")
+# Annotate with index + short ID
+agg_cum <- agg_cum %>%
+  group_by(region_name, var_region) %>%
+  mutate(
+    variant_index = stringr::str_pad(dense_rank(var_region), width = 4, pad = "0"),
+    var_pos_clean = stringr::str_extract(var_region, "(?<=@\\s)\\d+"),
+    var_pos_clean = ifelse(is.na(var_pos_clean), "posNA", var_pos_clean),
+    plot_id = glue("{region_name}_{variant_index}_@{var_pos_clean}")
+  ) %>%
+  ungroup()
 
-# Check if we have any variant-containing reads
-if (nrow(df_variant) == 0) {
-  stop("No variant-supporting reads found in the data", call. = FALSE)
-}
+# Split by clean short plot ID
+plot_data_list <- split(agg_cum, agg_cum$plot_id)
 
-# Remove rows with NA timestamps for plotting
-df_variant_clean <- df_variant %>% filter(!is.na(timestamp))
+# Make plots
+plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
+  region_name <- unique(region_data$region_name)
+  var_region  <- unique(region_data$var_region)
 
-if (nrow(df_variant_clean) == 0) {
-  warning("No valid timestamps found, cannot create time-based plot")
-  stop("All timestamps are NA or invalid", call. = FALSE)
-}
+  var_region2 <- var_region |>
+    gsub('<(.*)>', '\\1', x = _) |>
+    gsub('\\s?@', '\n\n@', x = _) |>
+    gsub('(.{175})', '\\1<br>', x =  _) |>
+    gsub('@<br>', '@', x =  _) |>
+    gsub('<br>([0-9]+)', '\\1', x = _)
 
-cat("Found", nrow(df_variant), "variant-supporting reads\n")
-cat("Found", nrow(df_variant_clean), "reads with valid timestamps\n")
+  md_title <- glue("### {region_name} Reference/Variant Support in Reads\n\n<i>{var_region2}</i>")
 
-# Create plot
-p <- ggplot(df_variant_clean, aes(x = timestamp, fill = variant_type)) +
-  geom_histogram(binwidth = opt$binwidth, position = "stack") +
-  labs(
-    title = opt$title,
-    x = "Time",
-    y = "Read Count",
-    fill = "Variant Type"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  main <- ggplot(region_data, aes(x = rel_time_hours, y = cumulative_reads, color = support)) +
+    geom_line(linewidth = 1) +
+    scale_color_manual(
+      values = c("variant" = "red", "reference" = "gray60"),
+      labels = c("reference" = "Reference Reads", "variant" = "Variant Reads"),
+      name = NULL
+    ) +
+    scale_x_continuous(
+      name = "Sequencing Time (H)",
+      breaks = seq(0, ceiling(as.numeric(difftime(global_time_max, global_time_min, units = "hours"))), by = 6),
+      minor_breaks = seq(0, ceiling(as.numeric(difftime(global_time_max, global_time_min, units = "hours"))), by = 1)
+    ) +
+    labs(y = "Cumulative Read Count", color = "Support Type") +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      legend.margin = margin(t = -10, b = 10),
+      legend.box.margin = margin(b = -10),
+      legend.text = element_text(size = 15)
+    ) +
+    ggtitle(md_title) +
+    theme(plot.title = element_marquee(
+      size = 10,
+      width = 1,
+      lineheight = 1.2,
+      margin = margin(b = 10)
+    ))
 
-# Save plot
-cat("Saving plot to:", opt$output, "\n")
-ggsave(opt$output, plot = p, width = opt$width, height = opt$height, dpi = opt$dpi)
+  variant_thresholds <- c(1, 5, 10)
+  threshold_colors <- c("1" = "red", "5" = "green", "10" = "blue")
 
-cat("Plot saved successfully!\n")
+  for (thresh in variant_thresholds) {
+    time_point <- region_data %>%
+      filter(support == "variant", cumulative_reads >= thresh) %>%
+      arrange(timestamp) %>%
+      slice(1) %>%
+      mutate(rel_time_hours = as.numeric(difftime(timestamp, global_time_min, units = "hours"))) %>%
+      pull(rel_time_hours)
+
+    if (length(time_point) == 1) {
+      main <- main +
+        geom_vline(
+          xintercept = as.numeric(time_point),
+          linetype = "dotted",
+          linewidth = 0.6,
+          color = threshold_colors[as.character(thresh)]
+        ) +
+        annotate(
+          "text",
+          x = time_point,
+          y = Inf,
+          label = glue(
+            "Time {floor(time_point)}:{stringr::str_pad(round((time_point %% 1) * 60), 2, pad = '0')} — ≥{thresh} variant read support"
+          ),
+          angle = 90,
+          vjust = -0.5,
+          hjust = 1,
+          size = 6,
+          color = threshold_colors[as.character(thresh)]
+        )
+    }
+  }
+
+  main
+})
+
+purrr::walk2(
+  names(plot_list), plot_list,
+  ~ggsave(glue("cumulative_reads_{.x}.png"), .y, width = 10, height = 6, dpi = 300)
+)
