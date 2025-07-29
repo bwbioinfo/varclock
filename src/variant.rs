@@ -233,6 +233,7 @@ pub fn analyze_read_allele_content_detailed(
     ref_allele: &str,
     alt_allele: &str,
     debug: bool,
+    breakend_span_tolerance: usize,
 ) -> AlleleMatch {
     // STEP 1: Check if read spans the variant position
     let read_start = match record.alignment_start() {
@@ -289,11 +290,25 @@ pub fn analyze_read_allele_content_detailed(
         }
         "BND" => {
             // Use CIGAR-based analysis for breakends
-            analyze_breakend_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
+            analyze_breakend_from_cigar(
+                record,
+                variant_pos,
+                ref_allele,
+                alt_allele,
+                debug,
+                breakend_span_tolerance,
+            )
         }
         "INV" | "CNV" => {
             // Use breakend analysis for inversions and CNVs (similar complex patterns)
-            analyze_breakend_from_cigar(record, variant_pos, ref_allele, alt_allele, debug)
+            analyze_breakend_from_cigar(
+                record,
+                variant_pos,
+                ref_allele,
+                alt_allele,
+                debug,
+                breakend_span_tolerance,
+            )
         }
         _ => {
             // Complex variants and other types - try sequence-based analysis
@@ -847,6 +862,7 @@ fn analyze_breakend_from_cigar(
     ref_allele: &str,
     alt_allele: &str,
     debug: bool,
+    breakend_span_tolerance: usize,
 ) -> AlleleMatch {
     let read_start = match record.alignment_start() {
         Some(Ok(start)) => usize::from(start),
@@ -897,7 +913,8 @@ fn analyze_breakend_from_cigar(
     }
 
     // Check supplementary alignment (SA) tag for breakend validation
-    let sa_tag_status = check_sa_tag_for_breakend(record, alt_allele, debug);
+    let sa_tag_status =
+        check_sa_tag_for_breakend(record, alt_allele, debug, breakend_span_tolerance);
 
     // For breakends, rely exclusively on SA tag validation
     match sa_tag_status {
@@ -931,7 +948,12 @@ fn analyze_breakend_from_cigar(
 /// SA tag format: "rname,pos,strand,CIGAR,mapQ,NM;"
 /// Example: "chr12,11875518,+,1S8285M27D179S,60,192;"
 /// Multiple SA entries are separated by semicolons.
-fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool) -> SaTagStatus {
+fn check_sa_tag_for_breakend(
+    record: &bam::Record,
+    alt_allele: &str,
+    debug: bool,
+    breakend_span_tolerance: usize,
+) -> SaTagStatus {
     use noodles_sam::alignment::record::data::field::Tag;
 
     // Extract the SA tag from the BAM record
@@ -1036,7 +1058,7 @@ fn check_sa_tag_for_breakend(record: &bam::Record, alt_allele: &str, debug: bool
             }
 
             // Check if the breakpoint falls within the SA alignment span with tolerance
-            let tolerance = 100; // Allow 100bp tolerance around the span
+            let tolerance = breakend_span_tolerance;
             let tolerant_start = span_start.saturating_sub(tolerance);
             let tolerant_end = span_end + tolerance;
 
@@ -1217,7 +1239,14 @@ pub fn analyze_read_variant_content(
     ref_allele: &str,
     alt_allele: &str,
 ) -> Option<bool> {
-    match analyze_read_allele_content_detailed(record, variant_pos, ref_allele, alt_allele, false) {
+    match analyze_read_allele_content_detailed(
+        record,
+        variant_pos,
+        ref_allele,
+        alt_allele,
+        false,
+        1000,
+    ) {
         AlleleMatch::Variant(_) => Some(true),
         AlleleMatch::Reference(_) => Some(false),
         _ => None,
@@ -1860,11 +1889,7 @@ mod tests {
             assert_eq!(
                 result,
                 Some((expected_start, expected_end)),
-                "Failed for {}: CIGAR={}, pos={}, strand={}",
-                description,
-                cigar,
-                start_pos,
-                strand
+                "Failed for {description}: CIGAR={cigar}, pos={start_pos}, strand={strand}"
             );
         }
 

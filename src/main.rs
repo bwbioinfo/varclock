@@ -71,6 +71,11 @@ struct Args {
     /// Enable debug output with detailed variant analysis information
     #[arg(long, default_value_t = false)]
     debug: bool,
+
+    /// Breakend span tolerance in base pairs (default: 1000)
+    /// Breakpoints within this distance from SA alignment spans are considered matches
+    #[arg(long, default_value_t = 1000)]
+    breakend_span_tolerance: usize,
 }
 
 /// Prints detailed information about the current thread pool configuration
@@ -91,11 +96,8 @@ fn print_thread_pool_info() {
     );
 }
 
-/// Process a single BED region with asynchronous parallel processing
-///
-/// This function orchestrates the complete read extraction and variant analysis workflow
-/// for a single genomic region. It represents the core computational unit of the pipeline.
-async fn process_bed_region_async(
+/// Parameters for processing a BED region
+struct ProcessRegionParams {
     region_idx: usize,
     bed_region: BedRegion,
     vcf_path: Arc<PathBuf>,
@@ -103,7 +105,26 @@ async fn process_bed_region_async(
     output_writer: Arc<std::sync::Mutex<BgzOutput>>,
     variant_chunk_size: usize,
     debug: bool,
+    breakend_span_tolerance: usize,
+}
+
+/// Process a single BED region with asynchronous parallel processing
+///
+/// This function orchestrates the complete read extraction and variant analysis workflow
+/// for a single genomic region. It represents the core computational unit of the pipeline.
+async fn process_bed_region_async(
+    params: ProcessRegionParams,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let ProcessRegionParams {
+        region_idx,
+        bed_region,
+        vcf_path,
+        bam_path,
+        output_writer,
+        variant_chunk_size,
+        debug,
+        breakend_span_tolerance,
+    } = params;
     println!(
         "Processing BED region #{}: {} (async with indexed access)",
         region_idx, bed_region.region_string
@@ -409,7 +430,8 @@ async fn process_bed_region_async(
                                 variant.pos,
                                 &variant.ref_allele,
                                 &variant.alt_allele,
-                                debug
+                                debug,
+                                breakend_span_tolerance
                             );
 
                             if debug && reads_processed <= 3 {
@@ -691,6 +713,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let output_mutex = Arc::clone(&output_mutex);
                 let bed_region = bed_region.clone();
                 let debug = args.debug;
+                let breakend_span_tolerance = args.breakend_span_tolerance;
 
                 // Global task monitoring
                 let global_tasks = Arc::clone(&global_active_tasks);
@@ -721,16 +744,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    let result = process_bed_region_async(
+                    let params = ProcessRegionParams {
                         region_idx,
                         bed_region,
                         vcf_path,
                         bam_path,
-                        output_mutex,
+                        output_writer: output_mutex,
                         variant_chunk_size,
                         debug,
-                    )
-                    .await;
+                        breakend_span_tolerance,
+                    };
+                    let result = process_bed_region_async(params).await;
 
                     // Decrement active task count when done
                     global_tasks.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
