@@ -654,9 +654,9 @@ fn analyze_insertion_from_cigar(
                         );
                     }
 
-                    if op_len >= expected_insertion_length && !expected_insertion.is_empty() {
-                        // Check if the insertion matches what we expect
-                        if inserted_bases.starts_with(expected_insertion) {
+                    if op_len == expected_insertion_length && !expected_insertion.is_empty() {
+                        // Check if the insertion matches what we expect exactly
+                        if inserted_bases == expected_insertion {
                             return AlleleMatch::Variant(format!("INS:{ref_allele}>{alt_allele}"));
                         } else {
                             return AlleleMatch::Other(format!(
