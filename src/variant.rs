@@ -340,25 +340,25 @@ pub fn analyze_read_multiallelic_content(
         return MultiAlleleMatch::NoSpan;
     }
 
-    // STEP 2: Check against each alternate allele
+    // STEP 2: First check if read contains reference allele by checking against first alternate
     let mut matches_ref = false;
     let mut matched_alt_idx = None;
     let mut other_allele = None;
 
-    // First check reference allele
-    let ref_match = analyze_single_allele(
-        record,
-        variant_pos,
-        ref_allele,
-        ref_allele,
-        debug,
-        breakend_span_tolerance,
-    );
-    if ref_match.is_reference_match() {
-        matches_ref = true;
+    // Use first alternate to check for reference
+    if !alt_alleles.is_empty() {
+        let ref_check = analyze_single_allele(
+            record,
+            variant_pos,
+            ref_allele,
+            &alt_alleles[0],
+            debug,
+            breakend_span_tolerance,
+        );
+        matches_ref = ref_check.is_reference_match();
     }
 
-    // Check each alternate allele
+    // STEP 3: Check each alternate allele for specific matches
     for (idx, alt_allele) in alt_alleles.iter().enumerate() {
         let alt_match = analyze_single_allele(
             record,
@@ -368,6 +368,7 @@ pub fn analyze_read_multiallelic_content(
             debug,
             breakend_span_tolerance,
         );
+
         if alt_match.is_variant_match() {
             matched_alt_idx = Some(idx);
             break; // Found a match, stop checking other alleles
@@ -385,30 +386,37 @@ pub fn analyze_read_multiallelic_content(
         }
     }
 
-    // STEP 3: Return the appropriate match result
-    if matches_ref {
-        MultiAlleleMatch::Reference
-    } else if let Some(idx) = matched_alt_idx {
+    // STEP 4: Return the appropriate match result
+    // Priority: specific alt match > reference match > other allele > indeterminate
+    let final_result = if let Some(idx) = matched_alt_idx {
         MultiAlleleMatch::Variant(idx)
+    } else if matches_ref {
+        MultiAlleleMatch::Reference
     } else if let Some(allele) = other_allele {
         MultiAlleleMatch::Other(allele)
     } else {
         // Check if position is deleted
-        let first_alt = &alt_alleles[0];
-        let check_result = analyze_single_allele(
-            record,
-            variant_pos,
-            ref_allele,
-            first_alt,
-            debug,
-            breakend_span_tolerance,
-        );
-        match check_result {
-            AlleleMatch::Deletion => MultiAlleleMatch::Deletion,
-            AlleleMatch::NoSpan => MultiAlleleMatch::NoSpan,
-            _ => MultiAlleleMatch::Indeterminate,
+        if !alt_alleles.is_empty() {
+            let first_alt = &alt_alleles[0];
+            let check_result = analyze_single_allele(
+                record,
+                variant_pos,
+                ref_allele,
+                first_alt,
+                debug,
+                breakend_span_tolerance,
+            );
+            match check_result {
+                AlleleMatch::Deletion => MultiAlleleMatch::Deletion,
+                AlleleMatch::NoSpan => MultiAlleleMatch::NoSpan,
+                _ => MultiAlleleMatch::Indeterminate,
+            }
+        } else {
+            MultiAlleleMatch::Indeterminate
         }
-    }
+    };
+
+    final_result
 }
 
 /// Helper function to analyze a single allele (used internally by multiallelic analysis)
