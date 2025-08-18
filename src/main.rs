@@ -12,8 +12,8 @@ use futures::future;
 
 // Import our library modules
 use varclock::{
-    BedRegion, BgzOutput, analyze_read_allele_content_detailed, load_bed_regions,
-    query_bam_records_for_region, query_vcf_variants_for_region, read_spans_variant_position,
+    BedRegion, BgzOutput, load_bed_regions, query_bam_records_for_region,
+    query_vcf_variants_for_region, read_spans_variant_position,
 };
 
 /// Command-line arguments structure for the bioinformatics scanner tool
@@ -154,23 +154,50 @@ async fn process_bed_region_async(
     // Show detailed variant information including depth data
     if debug {
         for (i, variant) in variants.iter().enumerate().take(5) {
-            let depth_info = match (variant.ref_depth, variant.alt_depth, variant.total_depth) {
-                (Some(ref_d), Some(alt_d), _) => format!(" [REF={ref_d}, ALT={alt_d}]"),
-                (_, _, Some(total_d)) => format!(" [Total={total_d}]"),
-                _ => " [No depth info]".to_string(),
+            let depth_info = if let Some(ref_d) = variant.ref_depth {
+                let alt_depths_str = variant
+                    .alt_depths
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, d)| match d {
+                        Some(depth) => format!("ALT{}={}", idx + 1, depth),
+                        None => format!("ALT{}=?", idx + 1),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !alt_depths_str.is_empty() {
+                    format!(" [REF={ref_d}, {alt_depths_str}]")
+                } else {
+                    format!(" [REF={ref_d}]")
+                }
+            } else if let Some(total_d) = variant.total_depth {
+                format!(" [Total={total_d}]")
+            } else {
+                " [No depth info]".to_string()
             };
 
+            let alt_alleles_str = variant.alt_alleles.join(",");
+            let variant_types_str = variant.variant_types.join(",");
+            let descriptions_str = variant.descriptions.join("; ");
+
             println!(
-                "    DEBUG: Variant {}: {}:{} {}>{} ({}){} - desc: '{}'",
+                "    DEBUG: Variant {}: {}:{} {}>[{}] ({}){} - desc: '{}'",
                 i + 1,
                 variant.chrom,
                 variant.pos,
                 variant.ref_allele,
-                variant.alt_allele,
-                variant.variant_type,
+                alt_alleles_str,
+                variant_types_str,
                 depth_info,
-                variant.description
+                descriptions_str
             );
+
+            if variant.is_multiallelic() {
+                println!(
+                    "           Multi-allelic: {} alternate alleles",
+                    variant.num_alts()
+                );
+            }
         }
         if variants.len() > 5 {
             println!(
@@ -255,9 +282,15 @@ async fn process_bed_region_async(
 
                     // Show detailed variant and query information
                     if debug {
-                        println!("      DEBUG: Processing variant {}:{} {}>{} ({}) - '{}'",
-                                bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele,
-                                variant.variant_type, variant.description);
+                        let alt_alleles_str = variant.alt_alleles.join(",");
+                        let descriptions_str = variant.descriptions.join("; ");
+                        let types_str = variant.variant_types.join(",");
+                        println!("      DEBUG: Processing variant {}:{} REF={} ALT=[{}] (types: {}) - '{}'",
+                                bed_region.chrom, variant.pos, variant.ref_allele, alt_alleles_str,
+                                types_str, descriptions_str);
+                        if variant.is_multiallelic() {
+                            println!("      DEBUG: Multi-allelic variant with {} alternate alleles", variant.num_alts());
+                        }
                         println!("      DEBUG: Querying BAM region {}:{}-{} for this variant",
                                 bed_region.chrom, variant_start, variant_end);
                     }
@@ -272,8 +305,9 @@ async fn process_bed_region_async(
                     ) {
                         Ok(records) => {
                             if debug {
-                                println!("      DEBUG: Found {} reads for variant {}:{} {}>{}",
-                                        records.len(), bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele);
+                                let alt_alleles_str = variant.alt_alleles.join(",");
+                                println!("      DEBUG: Found {} reads for variant {}:{} {}>[{}]",
+                                        records.len(), bed_region.chrom, variant.pos, variant.ref_allele, alt_alleles_str);
 
                                 // Show details of first few reads found including sequences
                                 if !records.is_empty() {
@@ -404,9 +438,10 @@ async fn process_bed_region_async(
                                 };
 
                                 if debug {
-                                    println!("        DEBUG: Read {}: {} spans {}:{}-{}, analyzing for variant {}:{} {}>{}",
+                                    let alt_alleles_str = variant.alt_alleles.join(",");
+                                    println!("        DEBUG: Read {}: {} spans {}:{}-{}, analyzing for variant {}:{} {}>[{}]",
                                             reads_processed, read_id, bed_region.chrom, start_pos, end_pos,
-                                            bed_region.chrom, variant.pos, variant.ref_allele, variant.alt_allele);
+                                            bed_region.chrom, variant.pos, variant.ref_allele, alt_alleles_str);
                                     println!("        DEBUG: Read {reads_processed} sequence: {seq_preview}");
                                 }
                             }
@@ -424,40 +459,47 @@ async fn process_bed_region_async(
                                 println!("        DEBUG: Read {reads_processed} SPANS variant position");
                             }
 
-                            // STEP 2: Analyze read sequence to determine variant content
-                            let allele_result = analyze_read_allele_content_detailed(
+                            // STEP 2: Analyze read sequence to determine variant content (multi-allelic support)
+                            let allele_result = varclock::analyze_read_multiallelic_content(
                                 record,
                                 variant.pos,
                                 &variant.ref_allele,
-                                &variant.alt_allele,
+                                &variant.alt_alleles,
                                 debug,
                                 breakend_span_tolerance
                             );
 
                             if debug && reads_processed <= 3 {
                                 let result_description = match &allele_result {
-                                    varclock::AlleleMatch::Reference(seq) => format!("REFERENCE match (found: {seq})"),
-                                    varclock::AlleleMatch::Variant(seq) => format!("VARIANT match (found: {seq})"),
-                                    varclock::AlleleMatch::Other(seq) => format!("OTHER sequence (found: {seq})"),
-                                    varclock::AlleleMatch::NoSpan => "NO SPAN (read doesn't span variant)".to_string(),
-                                    varclock::AlleleMatch::Deletion => "DELETION (variant in deletion)".to_string(),
-                                    varclock::AlleleMatch::Indeterminate => "INDETERMINATE (couldn't analyze)".to_string(),
+                                    varclock::MultiAlleleMatch::Reference => "REFERENCE match".to_string(),
+                                    varclock::MultiAlleleMatch::Variant(idx) => {
+                                        if let Some(allele) = variant.alt_alleles.get(*idx) {
+                                            format!("VARIANT match (ALT{}: {})", idx + 1, allele)
+                                        } else {
+                                            format!("VARIANT match (ALT{})", idx + 1)
+                                        }
+                                    },
+                                    varclock::MultiAlleleMatch::Other(seq) => format!("OTHER sequence (found: {seq})"),
+                                    varclock::MultiAlleleMatch::NoSpan => "NO SPAN (read doesn't span variant)".to_string(),
+                                    varclock::MultiAlleleMatch::Deletion => "DELETION (variant in deletion)".to_string(),
+                                    varclock::MultiAlleleMatch::Indeterminate => "INDETERMINATE (couldn't analyze)".to_string(),
                                 };
                                 println!("        DEBUG: Read {reads_processed} allele analysis: {result_description}");
-                                println!("        DEBUG: Expected - REF: '{}', ALT: '{}'",
-                                        variant.ref_allele, variant.alt_allele);
+                                let alt_alleles_str = variant.alt_alleles.join(", ");
+                                println!("        DEBUG: Expected - REF: '{}', ALT: [{}]",
+                                        variant.ref_allele, alt_alleles_str);
                             }
 
                             // Include reads with definitive matches and OTVAR (skip only indeterminate/no span/deletion)
                             match &allele_result {
-                                varclock::AlleleMatch::Reference(_) |
-                                varclock::AlleleMatch::Variant(_) |
-                                varclock::AlleleMatch::Other(_) => {
+                                varclock::MultiAlleleMatch::Reference |
+                                varclock::MultiAlleleMatch::Variant(_) |
+                                varclock::MultiAlleleMatch::Other(_) => {
                                     // Include these in output
                                 }
-                                varclock::AlleleMatch::NoSpan |
-                                varclock::AlleleMatch::Deletion |
-                                varclock::AlleleMatch::Indeterminate => {
+                                varclock::MultiAlleleMatch::NoSpan |
+                                varclock::MultiAlleleMatch::Deletion |
+                                varclock::MultiAlleleMatch::Indeterminate => {
                                     if debug && reads_processed <= 3 {
                                         println!("        DEBUG: Read {reads_processed} excluded (no span/deletion/indeterminate)");
                                     }
@@ -468,33 +510,52 @@ async fn process_bed_region_async(
                             reads_with_definitive_match += 1;
                             if debug && reads_processed <= 3 {
                                 let match_type = match &allele_result {
-                                    varclock::AlleleMatch::Reference(_) => "REFERENCE",
-                                    varclock::AlleleMatch::Variant(_) => "VARIANT",
-                                    varclock::AlleleMatch::Other(_) => "OTHER/OTVAR",
+                                    varclock::MultiAlleleMatch::Reference => "REFERENCE",
+                                    varclock::MultiAlleleMatch::Variant(_) => "VARIANT",
+                                    varclock::MultiAlleleMatch::Other(_) => "OTHER/OTVAR",
                                     _ => "UNKNOWN"
                                 };
                                 println!("        DEBUG: Read {reads_processed} included as {match_type}");
                             }
 
-                            let allele_match = allele_result.to_output_string();
+                            let allele_match = allele_result.to_output_string(&variant.alt_alleles);
+
+                            // Get the specific allele and variant type for this match
+                            let (matched_alt_allele, matched_description, matched_type) =
+                                if let varclock::MultiAlleleMatch::Variant(idx) = &allele_result {
+                                    // Use the specific matched alternate allele's info
+                                    (
+                                        variant.alt_alleles.get(*idx).map(|s| s.as_str()).unwrap_or(""),
+                                        variant.descriptions.get(*idx).map(|s| s.as_str()).unwrap_or(""),
+                                        variant.variant_types.get(*idx).map(|s| s.as_str()).unwrap_or("")
+                                    )
+                                } else {
+                                    // For reference or other matches, show all alternates
+                                    (
+                                        &variant.alt_alleles.join(",") as &str,
+                                        &variant.descriptions.join("; ") as &str,
+                                        &variant.variant_types.join(",") as &str
+                                    )
+                                };
 
                             // OUTPUT FORMAT: Tab-separated values with read and variant metadata
                             Some(format!(
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_id,                    // Read identifier
                                 timestamp,                  // Sequencing timestamp
-                                allele_match,               // VARIANT:seq|REFERENCE:seq - which allele the read contains
+                                allele_match,               // VARIANT:ALT1:seq|REFERENCE|OTHER:seq - which allele the read contains
                                 variant.chrom,              // Variant chromosome
                                 variant.pos,                // Variant position (1-based)
                                 variant.ref_allele,         // Reference allele
-                                variant.alt_allele,         // Alternative allele
-                                variant.description,        // Variant description (e.g., "A>G")
-                                variant.variant_type,       // Variant type (SNV/INS/DEL/etc.)
+                                matched_alt_allele,         // Alternative allele(s) - specific matched allele or all
+                                matched_description,        // Variant description(s)
+                                matched_type,               // Variant type(s) (SNV/INS/DEL/etc.)
                                 bed_region.region_string,   // Genomic region (chr:start-end)
                                 bed_region.region_name,     // Region name/identifier
                                 start_pos,                  // Read start position
                                 end_pos,                    // Read end position
-                                mapping_quality             // Mapping quality score
+                                mapping_quality,            // Mapping quality score
+                                variant.num_alts()          // Number of alternate alleles for this variant
                             ))
                         })
                         .collect();  // Collect results for this variant
@@ -506,20 +567,33 @@ async fn process_bed_region_async(
                     }
 
                     // SANITY CHECK: Compare our results with VCF depth information
-                    let ref_count = result.iter().filter(|line| line.contains("REFERENCE:")).count();
+                    let ref_count = result.iter().filter(|line| line.contains("REFERENCE")).count();
                     let alt_count = result.iter().filter(|line| line.contains("VARIANT:")).count();
                     let other_count = result.iter().filter(|line| line.contains("OTHER:")).count();
 
-                    if let (Some(vcf_ref), Some(vcf_alt)) = (variant.ref_depth, variant.alt_depth) {
-                        println!("      SANITY CHECK: VCF reports REF={vcf_ref} ALT={vcf_alt}, we found REF={ref_count} ALT={alt_count} OTHER={other_count}");
+                    // Count reads for each specific alternate allele
+                    let mut alt_specific_counts = vec![0; variant.num_alts()];
+                    for (i, count) in alt_specific_counts.iter_mut().enumerate().take(variant.num_alts()) {
+                        let pattern = format!("VARIANT:ALT{}", i + 1);
+                        *count = result.iter().filter(|line| line.contains(&pattern)).count();
+                    }
+
+                    if variant.ref_depth.is_some() {
+                        let vcf_ref = variant.ref_depth.unwrap_or(0);
+                        println!("      SANITY CHECK: VCF reports REF={vcf_ref}, we found REF={ref_count} ALT={alt_count} OTHER={other_count}");
+
+                        if variant.is_multiallelic() {
+                            println!("      Multi-allelic breakdown: {}",
+                                    alt_specific_counts.iter().enumerate()
+                                        .map(|(i, c)| format!("ALT{}={}", i+1, c))
+                                        .collect::<Vec<_>>().join(", "));
+                        }
 
                         let ref_diff = (ref_count as i32 - vcf_ref as i32).abs();
-                        let alt_diff = (alt_count as i32 - vcf_alt as i32).abs();
-
-                        if ref_diff > 0 || alt_diff > 0 {
-                            println!("      WARNING: Read count mismatch! REF diff: {ref_diff}, ALT diff: {alt_diff}");
+                        if ref_diff > 0 {
+                            println!("      WARNING: Read count mismatch! REF diff: {ref_diff}");
                         } else {
-                            println!("      PASS: Read counts match VCF exactly!");
+                            println!("      PASS: Reference read counts match VCF!");
                         }
                     } else if let Some(vcf_total) = variant.total_depth {
                         println!("      SANITY CHECK: VCF reports total depth={}, we found {} supporting reads",
@@ -651,7 +725,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the BGZ output file and write TSV header row
     let mut bgz_output = BgzOutput::new(output_path.clone(), args.create_index)?;
 
-    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality") {
+    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality\tnum_alts") {
         println!("ERROR: Failed to write header to output file: {e:?}");
         return Err(format!("Failed to write header: {e:?}").into());
     }

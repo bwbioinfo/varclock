@@ -20,8 +20,8 @@ pub use bed::load_bed_regions;
 pub use output::BgzOutput;
 pub use types::{BedRegion, Variant};
 pub use variant::{
-    AlleleMatch, analyze_read_allele_content_detailed, analyze_read_variant_content,
-    classify_variant_type, extract_read_bases_at_position, parse_breakend_mate_position,
-    read_spans_variant_position,
+    AlleleMatch, MultiAlleleMatch, analyze_read_allele_content_detailed,
+    analyze_read_multiallelic_content, analyze_read_variant_content, classify_variant_type,
+    extract_read_bases_at_position, parse_breakend_mate_position, read_spans_variant_position,
 };
 pub use vcf::{parse_bnd_variant, query_vcf_variants_for_region};

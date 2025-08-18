@@ -42,6 +42,25 @@ pub enum AlleleMatch {
     Indeterminate,
 }
 
+/// Result of analyzing read content for multiple alternate alleles
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiAlleleMatch {
+    /// Read contains the reference allele at the variant position
+    Reference,
+    /// Read contains one of the variant (alternative) alleles at the variant position
+    /// The usize indicates which alternate allele index (0-based)
+    Variant(usize),
+    /// Read contains a different sequence (neither ref nor any alt)
+    /// The String contains the actual allele found
+    Other(String),
+    /// Read doesn't span the variant position
+    NoSpan,
+    /// Variant position falls in a deletion in the read
+    Deletion,
+    /// Indeterminate - couldn't extract or analyze sequence
+    Indeterminate,
+}
+
 /// Result of checking SA tag for breakend support
 #[derive(Debug, Clone, PartialEq)]
 enum SaTagStatus {
@@ -84,6 +103,58 @@ impl AlleleMatch {
     /// Check if this represents a reference allele match
     pub fn is_reference_match(&self) -> bool {
         matches!(self, AlleleMatch::Reference(_))
+    }
+}
+
+impl MultiAlleleMatch {
+    /// Convert to string representation for output
+    pub fn to_output_string(&self, alt_alleles: &[String]) -> String {
+        match self {
+            MultiAlleleMatch::Reference => "REFERENCE".to_string(),
+            MultiAlleleMatch::Variant(idx) => {
+                if let Some(allele) = alt_alleles.get(*idx) {
+                    format!("VARIANT:ALT{}:{}", idx + 1, allele)
+                } else {
+                    format!("VARIANT:ALT{}", idx + 1)
+                }
+            }
+            MultiAlleleMatch::Other(seq) => format!("OTHER:{seq}"),
+            MultiAlleleMatch::NoSpan => "NO_SPAN".to_string(),
+            MultiAlleleMatch::Deletion => "DELETION".to_string(),
+            MultiAlleleMatch::Indeterminate => "INDETERMINATE".to_string(),
+        }
+    }
+
+    /// Check if this is a definitive match (ref or alt, not other/indeterminate)
+    pub fn is_definitive_match(&self) -> bool {
+        matches!(
+            self,
+            MultiAlleleMatch::Reference | MultiAlleleMatch::Variant(_)
+        )
+    }
+
+    /// Check if this is a variant match
+    pub fn is_variant_match(&self) -> bool {
+        matches!(self, MultiAlleleMatch::Variant(_))
+    }
+
+    /// Check if this is an other/novel allele match
+    pub fn is_other_match(&self) -> bool {
+        matches!(self, MultiAlleleMatch::Other(_))
+    }
+
+    /// Check if this is a reference match
+    pub fn is_reference_match(&self) -> bool {
+        matches!(self, MultiAlleleMatch::Reference)
+    }
+
+    /// Get the matched alternate allele index if this is a variant match
+    pub fn get_alt_index(&self) -> Option<usize> {
+        if let MultiAlleleMatch::Variant(idx) = self {
+            Some(*idx)
+        } else {
+            None
+        }
     }
 }
 
@@ -227,6 +298,138 @@ pub fn classify_variant_type(ref_allele: &str, alt_allele: &str) -> &'static str
 ///
 /// **Returns:**
 /// - `AlleleMatch` enum with detailed information about the match
+///   Analyze a read against multiple alternate alleles
+pub fn analyze_read_multiallelic_content(
+    record: &bam::Record,
+    variant_pos: usize,
+    ref_allele: &str,
+    alt_alleles: &[String],
+    debug: bool,
+    breakend_span_tolerance: usize,
+) -> MultiAlleleMatch {
+    // STEP 1: Check if read spans the variant position
+    let read_start = match record.alignment_start() {
+        Some(Ok(start)) => usize::from(start),
+        _ => return MultiAlleleMatch::Indeterminate,
+    };
+
+    // Calculate read end using CIGAR operations
+    let cigar = record.cigar();
+    let mut reference_pos = read_start;
+    for op in cigar.iter().flatten() {
+        let op_len = op.len();
+        match op.kind() {
+            Kind::Match
+            | Kind::SequenceMatch
+            | Kind::SequenceMismatch
+            | Kind::Deletion
+            | Kind::Skip => {
+                reference_pos += op_len;
+            }
+            _ => {} // Insertions, clipping, etc. don't advance reference position
+        }
+    }
+    let read_end = if reference_pos > read_start {
+        reference_pos - 1
+    } else {
+        read_start
+    };
+
+    // Check if variant position is within read span
+    if variant_pos < read_start || variant_pos > read_end {
+        return MultiAlleleMatch::NoSpan;
+    }
+
+    // STEP 2: Check against each alternate allele
+    let mut matches_ref = false;
+    let mut matched_alt_idx = None;
+    let mut other_allele = None;
+
+    // First check reference allele
+    let ref_match = analyze_single_allele(
+        record,
+        variant_pos,
+        ref_allele,
+        ref_allele,
+        debug,
+        breakend_span_tolerance,
+    );
+    if ref_match.is_reference_match() {
+        matches_ref = true;
+    }
+
+    // Check each alternate allele
+    for (idx, alt_allele) in alt_alleles.iter().enumerate() {
+        let alt_match = analyze_single_allele(
+            record,
+            variant_pos,
+            ref_allele,
+            alt_allele,
+            debug,
+            breakend_span_tolerance,
+        );
+        if alt_match.is_variant_match() {
+            matched_alt_idx = Some(idx);
+            break; // Found a match, stop checking other alleles
+        } else if alt_match.is_other_match() {
+            // Extract the actual allele if it's different
+            // Calculate relative position in the read
+            if let Some(Ok(alignment_start)) = record.alignment_start() {
+                let read_pos = variant_pos.saturating_sub(usize::from(alignment_start));
+                let sequence = record.sequence();
+                let bases = extract_read_bases_at_position(&sequence, read_pos, alt_allele.len());
+                if !bases.is_empty() {
+                    other_allele = Some(bases);
+                }
+            }
+        }
+    }
+
+    // STEP 3: Return the appropriate match result
+    if matches_ref {
+        MultiAlleleMatch::Reference
+    } else if let Some(idx) = matched_alt_idx {
+        MultiAlleleMatch::Variant(idx)
+    } else if let Some(allele) = other_allele {
+        MultiAlleleMatch::Other(allele)
+    } else {
+        // Check if position is deleted
+        let first_alt = &alt_alleles[0];
+        let check_result = analyze_single_allele(
+            record,
+            variant_pos,
+            ref_allele,
+            first_alt,
+            debug,
+            breakend_span_tolerance,
+        );
+        match check_result {
+            AlleleMatch::Deletion => MultiAlleleMatch::Deletion,
+            AlleleMatch::NoSpan => MultiAlleleMatch::NoSpan,
+            _ => MultiAlleleMatch::Indeterminate,
+        }
+    }
+}
+
+/// Helper function to analyze a single allele (used internally by multiallelic analysis)
+fn analyze_single_allele(
+    record: &bam::Record,
+    variant_pos: usize,
+    ref_allele: &str,
+    alt_allele: &str,
+    debug: bool,
+    breakend_span_tolerance: usize,
+) -> AlleleMatch {
+    analyze_read_allele_content_detailed(
+        record,
+        variant_pos,
+        ref_allele,
+        alt_allele,
+        debug,
+        breakend_span_tolerance,
+    )
+}
+
 pub fn analyze_read_allele_content_detailed(
     record: &bam::Record,
     variant_pos: usize,

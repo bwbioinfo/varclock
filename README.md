@@ -4,17 +4,18 @@ A Rust-based tool for analyzing genetic variants in genomic regions with timing 
 
 ## Overview
 
-VarClock integrates data from three key bioinformatics file formats to provide comprehensive variant analysis:
+VarClock integrates data from three key bioinformatics file formats to provide comprehensive variant analysis with full support for multi-allelic variants:
 
 - **BED files**: Define genomic regions of interest
-- **VCF files**: Contain genetic variant information  
+- **VCF files**: Contain genetic variant information including multi-allelic sites
 - **BAM files**: Store aligned sequencing reads with timing data
 
 ## Features
 
+- ✅ **Multi-Allelic Variant Support**: Full detection and analysis of variants with multiple alternate alleles
 - ✅ **Multi-format Integration**: Seamlessly combines BED, VCF, and BAM data
 - ✅ **Timestamp Extraction**: Advanced parsing of nanopore timing data from BAM auxiliary tags
-- ✅ **Variant Overlap Detection**: Identifies which reads contain specific variants
+- ✅ **Variant Overlap Detection**: Identifies which reads contain specific variants and which alternate allele
 - ✅ **Comprehensive Output**: TSV format with detailed variant and timing information
 - ✅ **Error Handling**: Robust error reporting and graceful degradation
 - ✅ **Memory Efficient**: Optimized for large genomic datasets
@@ -87,19 +88,45 @@ Tab-separated values (TSV) with the following columns:
 |--------|-------------|---------|
 | read_id | Unique read identifier | read_001 |
 | timestamp | Sequencing start time | 2021-02-15T14:30:05.123Z |
-| contains_variant | Boolean overlap indicator | true |
+| allele_match | Which allele the read contains | VARIANT:ALT1:G |
+| variant_chrom | Variant chromosome | chr1 |
+| variant_pos | Variant position (1-based) | 1500 |
+| variant_ref | Reference allele | A |
+| variant_alt | Alternative allele(s) | G,T |
 | variant_description | Human-readable variant | A>G |
 | variant_type | Type of genetic variant | SNV |
 | region | Genomic coordinates | chr1:1000-2000 |
-| region_name | BED region identifier | NA |
+| region_name | BED region identifier | gene_region_1 |
+| read_start | Read alignment start | 1450 |
+| read_end | Read alignment end | 1550 |
+| mapping_quality | Read mapping quality | 60 |
+| num_alts | Number of alternate alleles | 2 |
 
 ### Example Output
+
+#### Single Allele Variant
 ```tsv
-read_id	timestamp	contains_variant	variant_description	variant_type	region	region_name
-read001	2021-02-15T14:30:05.123Z	true	A>G	SNV	chr1:1000-2000	NA
-read002	1613397005.123	false	C>T	SNV	chr1:1000-2000	NA
-read003	NA	true	G>A	SNV	chr2:5000-6000	NA
+read_id	timestamp	allele_match	variant_chrom	variant_pos	variant_ref	variant_alt	variant_description	variant_type	region	region_name	read_start	read_end	mapping_quality	num_alts
+read001	2021-02-15T14:30:05.123Z	VARIANT:ALT1:G	chr1	1500	A	G	A>G	SNV	chr1:1000-2000	region1	1450	1550	60	1
+read002	1613397005.123	REFERENCE	chr1	1500	A	G	A>G	SNV	chr1:1000-2000	region1	1480	1580	55	1
 ```
+
+#### Multi-Allelic Variant
+```tsv
+read_id	timestamp	allele_match	variant_chrom	variant_pos	variant_ref	variant_alt	variant_description	variant_type	region	region_name	read_start	read_end	mapping_quality	num_alts
+read003	2021-02-15T14:30:06.456Z	VARIANT:ALT1:T	chr2	2000	C	T	C>T	SNV	chr2:1900-2100	region2	1950	2050	62	3
+read004	2021-02-15T14:30:07.789Z	VARIANT:ALT2:G	chr2	2000	C	G	C>G	SNV	chr2:1900-2100	region2	1960	2060	58	3
+read005	2021-02-15T14:30:08.012Z	VARIANT:ALT3:A	chr2	2000	C	A	C>A	SNV	chr2:1900-2100	region2	1970	2070	61	3
+read006	2021-02-15T14:30:09.345Z	REFERENCE	chr2	2000	C	T,G,A	C>T; C>G; C>A	SNV,SNV,SNV	chr2:1900-2100	region2	1980	2080	59	3
+```
+
+### Multi-Allelic Support
+
+VarClock fully supports multi-allelic variants (positions with multiple alternate alleles):
+- The `allele_match` column indicates which specific alternate allele was detected (e.g., `VARIANT:ALT1:T` for the first alternate)
+- The `num_alts` column shows the total number of alternate alleles at that position
+- For multi-allelic sites, `variant_alt` may contain comma-separated alleles when showing reference matches
+- Each read is analyzed against all possible alleles and reports the best match
 
 ## Timestamp Extraction
 
