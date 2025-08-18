@@ -47,6 +47,10 @@ if (is.null(opt$input)) {
 varclock_results <- opt$input
 timing_file <- opt$timing
 
+# Extract base filename without extension
+input_basename <- basename(varclock_results)
+input_basename_noext <- sub("\\.[^.]*$", "", input_basename)
+
 cat("Input file:", varclock_results, "\n")
 cat("Timing file:", ifelse(is.null(timing_file), "None", timing_file), "\n")
 
@@ -61,12 +65,12 @@ df <- readr::read_tsv(varclock_results, col_types = readr::cols(.default = "c"))
 cat("Initial data dimensions:", nrow(df), "rows x", ncol(df), "columns\n")
 cat("Column names:", paste(colnames(df), collapse = ", "), "\n")
 
-# Transform and clean the data - CONSISTENT TIME ROUNDING
+# Transform and clean the data - PRESERVE MINUTE PRECISION
 df <- df %>%
   mutate(
-    # Parse timestamp and immediately floor to hour (consistent rounding)
+    # Parse timestamp and round to nearest minute (preserve precision)
     timestamp_raw = ymd_hms(timestamp, tz = "UTC"),
-    timestamp = floor_date(timestamp_raw, unit = "hour"),  # Floor to hour boundary
+    timestamp = round_date(timestamp_raw, unit = "secs"),  # Round to minute boundary
     # Determine if this read contains a variant
     contains_variant = stringr::str_starts(allele_match, "VARIANT"),
     # Create a readable variant region identifier
@@ -89,7 +93,7 @@ cat("  - Rounding analysis (first 10 rows):\n")
 rounding_check <- df %>%
   select(timestamp_raw, timestamp) %>%
   mutate(
-    time_diff_minutes = as.numeric(difftime(timestamp_raw, timestamp, units = "mins"))
+    time_diff_minutes = as.numeric(difftime(timestamp_raw, timestamp, units = "secs"))
   ) %>%
   head(10)
 print(rounding_check)
@@ -134,16 +138,16 @@ if (!is.null(timing_file) && file.exists(timing_file)) {
   if (length(earliest_line) > 0) {
     global_time_min_raw <- ymd_hms(earliest_line, tz = "UTC")
     # Floor the timing file time to hour boundary for consistency
-    global_time_min <- floor_date(global_time_min_raw, unit = "hour")
+    global_time_min <- floor_date(global_time_min_raw, unit = "secs")
     cat("Using timing file for start time (raw):", as.character(global_time_min_raw), "\n")
     cat("Using timing file for start time (floored):", as.character(global_time_min), "\n")
   } else {
     cat("Warning: Could not find 'Earliest:' line in timing file, using data minimum\n")
-    global_time_min <- floor_date(min(df$timestamp, na.rm = TRUE), unit = "hour")
+    global_time_min <- floor_date(min(df$timestamp, na.rm = TRUE), unit = "secs")
   }
 } else {
   cat("No timing file provided or file doesn't exist, using data minimum\n")
-  global_time_min <- floor_date(min(df$timestamp, na.rm = TRUE), unit = "hour")
+  global_time_min <- floor_date(min(df$timestamp, na.rm = TRUE), unit = "secs")
 }
 
 # Set global time maximum to 72 hours after start, floored to hour
@@ -152,7 +156,7 @@ global_time_max <- global_time_min + hours(72)
 cat("Time analysis window:\n")
 cat("  - Start:", as.character(global_time_min), "\n")
 cat("  - End:", as.character(global_time_max), "\n")
-cat("  - Duration:", as.numeric(difftime(global_time_max, global_time_min, units = "hours")), "hours\n")
+cat("  - Duration:", as.numeric(difftime(global_time_max, global_time_min, units = "secs")), "seconds\n")
 
 # =============================================================================
 # TIME GRID GENERATION WITH PROPER BOUNDARIES
@@ -160,15 +164,15 @@ cat("  - Duration:", as.numeric(difftime(global_time_max, global_time_min, units
 cat("\n=== Generating time grid with proper boundaries ===\n")
 
 # Generate full hourly sequence - ensure we capture full range
-full_hours <- seq(
+full_seconds <- seq(
   from = global_time_min,
   to = global_time_max,
-  by = "1 hour"
+  by = "1 sec"
 )
 
-cat("Generated", length(full_hours), "hourly time points\n")
-cat("First time point:", as.character(full_hours[1]), "\n")
-cat("Last time point:", as.character(full_hours[length(full_hours)]), "\n")
+cat("Generated", length(full_seconds), "hourly time points\n")
+cat("First time point:", as.character(full_seconds[1]), "\n")
+cat("Last time point:", as.character(full_seconds[length(full_seconds)]), "\n")
 
 # Get unique combinations of grouping variables
 group_vars <- df %>%
@@ -180,22 +184,28 @@ print(head(group_vars))
 # Expand grid: all time points x group combinations
 cat("Creating complete time x group grid...\n")
 time_grid <- tidyr::expand_grid(
-  timestamp = full_hours,
+  timestamp = full_seconds,
   group_vars
 )
+cat("\n=======================================\n")
+cat("\n=========  Testing Time Grid  =========\n")
+cat("\n=======================================\n")
+print(time_grid)
 
 cat("Time grid dimensions:", nrow(time_grid), "rows\n")
-cat("This represents", length(full_hours), "time points ×", nrow(group_vars), "group combinations\n")
+cat("This represents", length(full_seconds), "time points ×", nrow(group_vars), "group combinations\n")
 
 # =============================================================================
 # HOURLY AGGREGATION (NO ADDITIONAL ROUNDING)
 # =============================================================================
 cat("\n=== Aggregating data to hourly bins ===\n")
 
-# Since we already floored timestamps to hours, no additional rounding needed
+# Aggregate minute-level data to hourly bins
 df_hourly <- df %>%
-  group_by(timestamp, var_region, region_name, support) %>%
-  summarise(reads = n(), .groups = "drop")
+  mutate(second_floor = floor_date(timestamp, unit = "secs")) %>%
+  group_by(second_floor, var_region, region_name, support) %>%
+  summarise(reads = n(), .groups = "drop") %>%
+  rename(timestamp = second_floor)
 
 cat("Hourly aggregation complete:\n")
 cat("  - Aggregated data dimensions:", nrow(df_hourly), "rows\n")
@@ -227,7 +237,7 @@ agg_cum <- time_grid %>%
   group_by(var_region, region_name, support) %>%
   mutate(
     cumulative_reads = cumsum(reads),
-    rel_time_hours = as.numeric(difftime(timestamp, global_time_min, units = "hours"))
+    rel_time_seconds = as.numeric(difftime(timestamp, global_time_min, units = "secs"))
   ) %>%
   ungroup()
 
@@ -241,8 +251,8 @@ cat("Boundary condition verification:\n")
 boundary_check <- agg_cum %>%
   group_by(var_region, region_name, support) %>%
   summarise(
-    min_time = min(rel_time_hours),
-    max_time = max(rel_time_hours),
+    min_time = min(rel_time_seconds),
+    max_time = max(rel_time_seconds),
     min_cumulative = min(cumulative_reads),
     max_cumulative = max(cumulative_reads),
     .groups = "drop"
@@ -256,7 +266,7 @@ if (any(boundary_check$min_time != 0)) {
 }
 
 # Check that all series end at the same time
-expected_max_time <- as.numeric(difftime(global_time_max, global_time_min, units = "hours"))
+expected_max_time <- as.numeric(difftime(global_time_max, global_time_min, units = "secs"))
 if (any(boundary_check$max_time != expected_max_time)) {
   cat("WARNING: Some series don't end at expected time", expected_max_time, "!\n")
 }
@@ -288,6 +298,8 @@ for (i in seq_along(unique_plots)) {
   cat("    ", i, ":", unique_plots[i], "\n")
 }
 
+print(agg_cum)
+
 # =============================================================================
 # DATA SPLITTING FOR PLOTTING
 # =============================================================================
@@ -308,15 +320,16 @@ for (plot_id in names(plot_data_list)) {
 
   cat("Plot:", plot_id, "\n")
   cat("  - Data points per series:", nrow(variant_data), "\n")
-  cat("  - Variant series: starts at hour", min(variant_data$rel_time_hours),
+  cat("  - Variant series: starts at hour", min(variant_data$rel_time_seconds),
       "with", min(variant_data$cumulative_reads), "reads\n")
-  cat("  - Variant series: ends at hour", max(variant_data$rel_time_hours),
+  cat("  - Variant series: ends at hour", max(variant_data$rel_time_seconds),
       "with", max(variant_data$cumulative_reads), "reads\n")
-  cat("  - Reference series: starts at hour", min(reference_data$rel_time_hours),
+  cat("  - Reference series: starts at hour", min(reference_data$rel_time_seconds),
       "with", min(reference_data$cumulative_reads), "reads\n")
-  cat("  - Reference series: ends at hour", max(reference_data$rel_time_hours),
+  cat("  - Reference series: ends at hour", max(reference_data$rel_time_seconds),
       "with", max(reference_data$cumulative_reads), "reads\n")
 }
+
 
 # =============================================================================
 # PLOT GENERATION
@@ -327,6 +340,9 @@ cat("\n=== Generating plots ===\n")
 plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
   cat("Creating plot for:", plot_id, "\n")
 
+  print(region_data)
+
+
   # Extract metadata for this plot
   region_name <- unique(region_data$region_name)
   var_region  <- unique(region_data$var_region)
@@ -335,18 +351,18 @@ plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
   cat("  - Variant region:", var_region, "\n")
 
   # Verify this plot data has proper boundaries
-  time_range <- range(region_data$rel_time_hours)
-  cat("  - Time range: [", time_range[1], ",", time_range[2], "] hours\n")
+  time_range <- range(region_data$rel_time_seconds)
+  cat("  - Time range: [", time_range[1], ",", time_range[2], "] Seconds\n")
 
   # Check start and end points
   start_points <- region_data %>%
-    filter(rel_time_hours == min(rel_time_hours)) %>%
+    filter(rel_time_seconds == min(rel_time_seconds)) %>%
     select(support, cumulative_reads)
   cat("  - Start points:\n")
   print(start_points)
 
   end_points <- region_data %>%
-    filter(rel_time_hours == max(rel_time_hours)) %>%
+    filter(rel_time_seconds == max(rel_time_seconds)) %>%
     select(support, cumulative_reads)
   cat("  - End points:\n")
   print(end_points)
@@ -359,24 +375,30 @@ plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
     gsub('@<br>', '@', x =  _) |>             # Fix @ after line breaks
     gsub('<br>([0-9]+)', '\\1', x = _)        # Fix numbers after line breaks
 
-  # Create formatted title
-  md_title <- glue("### {region_name} Reference/Variant Support in Reads\n\n<i>{var_region2}</i>")
+  # Calculate VAF statistics
+  variant_max <- max(region_data$cumulative_reads[region_data$support == "variant"], na.rm = TRUE)
+  reference_max <- max(region_data$cumulative_reads[region_data$support == "reference"], na.rm = TRUE)
+  total_reads <- variant_max + reference_max
+  vaf <- round(100 * variant_max / total_reads, 2)
+
+  # Create formatted title with filename and VAF details
+  md_title <- glue("### {input_basename_noext} - {region_name} Reference/Variant Support in Reads\n\n<i>{var_region2}</i>\n\nVAF: {vaf}% ({variant_max} variant / {reference_max} reference / {total_reads} total reads)")
 
   # Create the main plot
-  main <- ggplot(region_data, aes(x = rel_time_hours, y = cumulative_reads, color = support)) +
+  main <- ggplot(
+    region_data,
+    aes(x = rel_time_seconds/3600, y = cumulative_reads, color = support)) +
     geom_line(linewidth = 1) +
     scale_color_manual(
       values = c("variant" = "orange", "reference" = "gray60"),
       labels = c("reference" = "Reference Reads", "variant" = "Variant Reads"),
       name = NULL
     ) +
-    scale_x_continuous(
-      name = "Sequencing Time (H)",
-      breaks = seq(0, ceiling(max(region_data$rel_time_hours)), by = 6),
-      minor_breaks = seq(0, ceiling(max(region_data$rel_time_hours)), by = 1),
-      # Ensure we show from 0 to max time
-      limits = c(0, max(region_data$rel_time_hours))
-    ) +
+   	scale_x_continuous(
+       name = "Sequencing Time (H)",
+    		breaks = seq(0, 72, by = 12),
+    		minor_breaks = seq(0, 72, by = 6)
+   	) +
     labs(y = "Cumulative Read Count", color = "Support Type") +
     theme_minimal(base_size = 14) +
     theme(
@@ -404,18 +426,30 @@ plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
   cat("  - Adding threshold annotations...\n")
 
   # Collect all threshold times first to handle x-axis overlaps
+  # Use original minute-level data to get precise timestamps
   threshold_times <- list()
-  for (thresh in variant_thresholds) {
-    # Find first time point where variant reads >= threshold
-    time_point <- region_data %>%
-      filter(support == "variant", cumulative_reads >= thresh) %>%
-      arrange(rel_time_hours) %>%
-      slice(1) %>%
-      pull(rel_time_hours)
 
-    if (length(time_point) == 1) {
+  # Get the variant/region info for this plot
+  plot_var_region <- unique(region_data$var_region)[1]  # Take first in case of multiple
+  plot_region_name <- unique(region_data$region_name)[1]  # Take first in case of multiple
+
+  for (thresh in variant_thresholds) {
+    # Find precise minute-level timestamp when threshold was reached
+    # First get cumulative counts at minute level
+    minute_cumulative <- df %>%
+      filter(var_region == plot_var_region, region_name == plot_region_name, support == "variant") %>%
+      arrange(timestamp) %>%
+      mutate(
+        cumulative_reads = row_number(),
+        rel_time_seconds = as.numeric(difftime(timestamp, global_time_min, units = "secs"))
+      ) %>%
+      filter(cumulative_reads >= thresh) %>%
+      slice(1)
+
+    if (nrow(minute_cumulative) == 1 && !is.na(minute_cumulative$rel_time_seconds)) {
+      time_point <- minute_cumulative$rel_time_seconds
       threshold_times[[as.character(thresh)]] <- time_point
-      cat("    - Threshold", thresh, "reached at hour", round(time_point, 2), "\n")
+      cat("    - Threshold", thresh, "reached at hour", round(time_point/3600, 3), "\n")
     } else {
       cat("    - Threshold", thresh, "never reached\n")
     }
@@ -428,15 +462,24 @@ plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
       threshold = as.numeric(names(threshold_times)),
       time_point = unlist(threshold_times),
       stringsAsFactors = FALSE
-    ) %>%
-      arrange(time_point, threshold)
+    )
+
+    # Safety check - ensure we have valid data
+    if (nrow(thresh_df) > 0 && !any(is.na(thresh_df$time_point))) {
+      thresh_df <- thresh_df %>% arrange(time_point, threshold)
+    } else {
+      # Create empty data frame with proper structure if no valid thresholds
+      thresh_df <- data.frame(threshold=numeric(0), time_point=numeric(0), x_nudge=numeric(0))
+    }
 
     # Calculate x-nudges to avoid overlap when times are too close
     thresh_df$x_nudge <- 0
-    for (i in 2:nrow(thresh_df)) {
-      time_diff <- thresh_df$time_point[i] - thresh_df$time_point[i-1]
-      if (time_diff < 1) {  # If within 1 hour, nudge
-        thresh_df$x_nudge[i] <- 1  # Nudge 30 minutes right
+    if (nrow(thresh_df) > 1) {
+      for (i in 2:nrow(thresh_df)) {
+        time_diff <- thresh_df$time_point[i] - thresh_df$time_point[i-1]
+        if (!is.na(time_diff) && time_diff < 3600) {  # If within 1 hour and not NA, nudge
+          thresh_df$x_nudge[i] <- 1.5  # Nudge right
+        }
       }
     }
 
@@ -448,17 +491,21 @@ plot_list <- purrr::imap(plot_data_list, function(region_data, plot_id) {
 
       main <- main +
         geom_vline(
-          xintercept = as.numeric(time_point),
+          xintercept = as.numeric(time_point/3600),
           linetype = "dotted",
           linewidth = 0.6,
           color = threshold_colors[as.character(thresh)]
         ) +
         annotate(
           "text",
-          x = time_point + x_nudge,
+          x = time_point/3600 + x_nudge,
           y = Inf,
-          label = glue(
-            "Time {floor(time_point)}:{stringr::str_pad(round((time_point %% 1) * 60), 2, pad = '0')} — ≥{thresh} variant read support"
+          label =
+          glue(
+            "Time {sprintf('%02d:%02d',
+                            floor(time_point / 3600),
+                            ceiling((time_point %% 3600) / 60)
+             )} — ≥{thresh} variant read support"
           ),
           angle = 90,
           vjust = -0.5,
