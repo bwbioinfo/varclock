@@ -388,7 +388,9 @@ pub fn analyze_read_multiallelic_content(
 
     // STEP 4: Return the appropriate match result
     // Priority: specific alt match > reference match > other allele > indeterminate
-    let final_result = if let Some(idx) = matched_alt_idx {
+    
+
+    if let Some(idx) = matched_alt_idx {
         MultiAlleleMatch::Variant(idx)
     } else if matches_ref {
         MultiAlleleMatch::Reference
@@ -414,9 +416,7 @@ pub fn analyze_read_multiallelic_content(
         } else {
             MultiAlleleMatch::Indeterminate
         }
-    };
-
-    final_result
+    }
 }
 
 /// Helper function to analyze a single allele (used internally by multiallelic analysis)

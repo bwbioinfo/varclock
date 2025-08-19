@@ -124,7 +124,7 @@ fn query_vcf_variants_indexed(
     let alt_index_path = format!("{}.tbi", vcf_path.display());
     eprintln!("DEBUG: Expected index path 1: {}", index_path.display());
     eprintln!("DEBUG: Index path 1 exists: {}", index_path.exists());
-    eprintln!("DEBUG: Expected index path 2: {}", alt_index_path);
+    eprintln!("DEBUG: Expected index path 2: {alt_index_path}");
     eprintln!(
         "DEBUG: Index path 2 exists: {}",
         std::path::Path::new(&alt_index_path).exists()
@@ -151,7 +151,7 @@ fn query_vcf_variants_indexed(
                 reader
             }
             Err(e) => {
-                eprintln!("DEBUG: Failed to create indexed reader: {:?}", e);
+                eprintln!("DEBUG: Failed to create indexed reader: {e:?}");
                 return Err(format!(
                     "Failed to create indexed VCF reader for {}: {:?}",
                     vcf_path.display(),
@@ -166,11 +166,23 @@ fn query_vcf_variants_indexed(
     let header = match indexed_reader.read_header() {
         Ok(h) => {
             eprintln!("DEBUG: Successfully read VCF header");
+
+            // Debug: List available reference sequences
+            eprintln!("DEBUG: Available reference sequences in VCF:");
+            for (i, (name, _)) in h.contigs().iter().enumerate() {
+                eprintln!("  {i}: {name}");
+                if i >= 10 {
+                    eprintln!("  ... and {} more", h.contigs().len() - 10);
+                    break;
+                }
+            }
+            eprintln!("DEBUG: Looking for chromosome: {chrom}");
+
             h
         }
         Err(e) => {
-            eprintln!("DEBUG: Failed to read VCF header: {:?}", e);
-            return Err(format!("Failed to read VCF header: {:?}", e).into());
+            eprintln!("DEBUG: Failed to read VCF header: {e:?}");
+            return Err(format!("Failed to read VCF header: {e:?}").into());
         }
     };
 
@@ -188,8 +200,7 @@ fn query_vcf_variants_indexed(
     // STEP 4: Execute indexed query to get variant iterator
     // This uses the .tbi index to jump directly to file regions containing overlapping variants
     eprintln!(
-        "DEBUG: Attempting to query region: {}:{}-{}",
-        chrom, start_pos, end_pos
+        "DEBUG: Attempting to query region: {chrom}:{start_pos}-{end_pos}"
     );
     let query = match indexed_reader.query(&header, &region) {
         Ok(q) => {
@@ -197,10 +208,9 @@ fn query_vcf_variants_indexed(
             q
         }
         Err(e) => {
-            eprintln!("DEBUG: Failed to create region query: {:?}", e);
+            eprintln!("DEBUG: Failed to create region query: {e:?}");
             return Err(format!(
-                "Failed to query region {}:{}-{}: {:?}",
-                chrom, start_pos, end_pos, e
+                "Failed to query region {chrom}:{start_pos}-{end_pos}: {e:?}"
             )
             .into());
         }
@@ -350,15 +360,13 @@ pub fn debug_vcf_access(
     // Check file permissions by trying to open it
     match std::fs::File::open(vcf_path) {
         Ok(_) => println!("✓ VCF file is readable"),
-        Err(e) => println!("✗ Cannot read VCF file: {}", e),
+        Err(e) => println!("✗ Cannot read VCF file: {e}"),
     }
 
     // Check for index files in multiple possible locations
-    let possible_index_paths = vec![
-        format!("{}.tbi", vcf_path.display()),
+    let possible_index_paths = [format!("{}.tbi", vcf_path.display()),
         vcf_path.with_extension("vcf.gz.tbi").display().to_string(),
-        vcf_path.with_extension("tbi").display().to_string(),
-    ];
+        vcf_path.with_extension("tbi").display().to_string()];
 
     println!("\nChecking for index files:");
     for (i, index_path) in possible_index_paths.iter().enumerate() {
@@ -368,7 +376,7 @@ pub fn debug_vcf_access(
         if path.exists() {
             match std::fs::File::open(path) {
                 Ok(_) => println!("    ✓ Readable"),
-                Err(e) => println!("    ✗ Not readable: {}", e),
+                Err(e) => println!("    ✗ Not readable: {e}"),
             }
         }
     }
@@ -376,13 +384,110 @@ pub fn debug_vcf_access(
     // Try to create the indexed reader
     println!("\nTesting indexed reader creation:");
     match vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path) {
-        Ok(_) => println!("✓ Successfully created indexed reader"),
+        Ok(mut reader) => {
+            println!("✓ Successfully created indexed reader");
+
+            // Test header reading and list available chromosomes
+            match reader.read_header() {
+                Ok(header) => {
+                    println!("✓ Successfully read VCF header");
+                    println!("\nAvailable reference sequences:");
+                    for (i, (name, _)) in header.contigs().iter().enumerate() {
+                        println!("  {i}: {name}");
+                        if i >= 20 {
+                            println!("  ... and {} more", header.contigs().len() - 20);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => println!("✗ Failed to read VCF header: {e:?}"),
+            }
+        }
         Err(e) => {
-            println!("✗ Failed to create indexed reader: {:?}", e);
+            println!("✗ Failed to create indexed reader: {e:?}");
             return Err(e.into());
         }
     }
 
     println!("=== Debug Complete ===\n");
     Ok(())
+}
+
+/// Compare VCF access from current directory vs absolute path
+///
+/// This function helps diagnose differences between accessing VCF files
+/// from the same directory vs using absolute paths from different directories.
+pub fn compare_vcf_access_methods(
+    vcf_path: &PathBuf,
+    chrom: &str,
+    start_pos: usize,
+    end_pos: usize,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("=== VCF Access Method Comparison ===");
+
+    let original_dir = std::env::current_dir()?;
+    println!("Original directory: {}", original_dir.display());
+
+    // Method 1: Absolute path from current directory
+    println!("\n--- Method 1: Absolute Path from Current Directory ---");
+    let abs_result = test_vcf_query(vcf_path, chrom, start_pos, end_pos);
+    match abs_result {
+        Ok(count) => println!("✓ Found {count} variants using absolute path"),
+        Err(e) => println!("✗ Failed with absolute path: {e}"),
+    }
+
+    // Method 2: From VCF's directory with relative path
+    if let Some(vcf_dir) = vcf_path.parent()
+        && let Some(filename) = vcf_path.file_name() {
+            println!("\n--- Method 2: Relative Path from VCF Directory ---");
+            println!("Changing to directory: {}", vcf_dir.display());
+
+            match std::env::set_current_dir(vcf_dir) {
+                Ok(_) => {
+                    let relative_path = PathBuf::from(filename);
+                    let rel_result = test_vcf_query(&relative_path, chrom, start_pos, end_pos);
+                    match rel_result {
+                        Ok(count) => println!("✓ Found {count} variants using relative path"),
+                        Err(e) => println!("✗ Failed with relative path: {e}"),
+                    }
+
+                    // Restore original directory
+                    if let Err(e) = std::env::set_current_dir(&original_dir) {
+                        println!("WARNING: Failed to restore directory: {e}");
+                    }
+                }
+                Err(e) => println!("✗ Failed to change to VCF directory: {e}"),
+            }
+        }
+
+    println!("\n=== Comparison Complete ===");
+    Ok(())
+}
+
+/// Test VCF query without detailed logging
+fn test_vcf_query(
+    vcf_path: &PathBuf,
+    chrom: &str,
+    start_pos: usize,
+    end_pos: usize,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let mut indexed_reader =
+        vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path)?;
+
+    let header = indexed_reader.read_header()?;
+
+    let start_position = noodles_core::Position::try_from(start_pos)?;
+    let end_position = noodles_core::Position::try_from(end_pos)?;
+    let interval = start_position..=end_position;
+    let region = noodles_core::Region::new(chrom, interval);
+
+    let query = indexed_reader.query(&header, &region)?;
+
+    let mut count = 0;
+    for result in query {
+        let _record = result?;
+        count += 1;
+    }
+
+    Ok(count)
 }
