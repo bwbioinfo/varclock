@@ -13,10 +13,11 @@ VarClock integrates data from three key bioinformatics file formats to provide c
 ## Features
 
 - ✅ **Multi-Allelic Variant Support**: Full detection and analysis of variants with multiple alternate alleles
+- ✅ **Enhanced Variant Grouping**: Preserves multi-allelic variant relationships with unique group identifiers
 - ✅ **Multi-format Integration**: Seamlessly combines BED, VCF, and BAM data
 - ✅ **Timestamp Extraction**: Advanced parsing of nanopore timing data from BAM auxiliary tags
 - ✅ **Variant Overlap Detection**: Identifies which reads contain specific variants and which alternate allele
-- ✅ **Comprehensive Output**: TSV format with detailed variant and timing information
+- ✅ **Comprehensive Output**: TSV format with detailed variant and timing information plus grouping metadata
 - ✅ **Error Handling**: Robust error reporting and graceful degradation
 - ✅ **Memory Efficient**: Optimized for large genomic datasets
 
@@ -120,13 +121,44 @@ read005	2021-02-15T14:30:08.012Z	VARIANT:ALT3:A	chr2	2000	C	A	C>A	SNV	chr2:1900-
 read006	2021-02-15T14:30:09.345Z	REFERENCE	chr2	2000	C	T,G,A	C>T; C>G; C>A	SNV,SNV,SNV	chr2:1900-2100	region2	1980	2080	59	3
 ```
 
-### Multi-Allelic Support
+### Multi-Allelic Support & Grouping
 
-VarClock fully supports multi-allelic variants (positions with multiple alternate alleles):
+VarClock fully supports multi-allelic variants (positions with multiple alternate alleles) with enhanced grouping features:
 - The `allele_match` column indicates which specific alternate allele was detected (e.g., `VARIANT:ALT1:T` for the first alternate)
 - The `num_alts` column shows the total number of alternate alleles at that position
+- **NEW**: `variant_group_id` provides unique identifiers for variant groups (e.g., `chr1:10030:ATG>A,ATGTG,AT`)
+- **NEW**: `variant_summary` offers human-readable descriptions (e.g., `chr1:10030 3-allelic ATG>A,ATGTG,AT`)
 - For multi-allelic sites, `variant_alt` may contain comma-separated alleles when showing reference matches
 - Each read is analyzed against all possible alleles and reports the best match
+
+#### Enhanced Output Format
+The new output includes grouping columns that preserve multi-allelic variant relationships:
+
+```tsv
+read_id	timestamp	allele_match	variant_chrom	variant_pos	variant_ref	variant_alt	variant_description	variant_type	variant_group_id	variant_summary	region	region_name	read_start	read_end	mapping_quality	num_alts
+read001	2021-02-15T14:30:05.123Z	VARIANT:ALT1:T	chr1	1000	C	T	C>T	SNV	chr1:1000:C>T	chr1:1000 C>T	chr1:900-1100	region1	950	1050	60	1
+read002	2021-02-15T14:30:06.456Z	OTHER:N	chr2	2000	ATG	A,ATGTG,AT	ATG>A; ATG>ATGTG; ATG>AT	DEL,INS,DEL	chr2:2000:ATG>A,ATGTG,AT	chr2:2000 3-allelic ATG>A,ATGTG,AT	chr2:1900-2100	region2	1950	2050	58	3
+```
+
+#### Grouping Analysis Examples
+
+```bash
+# Count reads per variant group
+zcat results.tsv.gz | tail -n +2 | cut -f10,11 | sort | uniq -c
+
+# Filter multi-allelic variants only
+zcat results.tsv.gz | awk -F'\t' 'NR==1 || $NF > 1' > multiallelic_only.tsv
+
+# Analyze specific variant group
+zcat results.tsv.gz | grep "chr1:10030:ATG>A,ATGTG,AT" | cut -f1,3
+```
+
+Use the provided analysis script for comprehensive grouping analysis:
+```bash
+python examples/analyze_multiallelic_groups.py results.tsv.gz analysis_output
+```
+
+See [MULTIALLELIC_GROUPING.md](MULTIALLELIC_GROUPING.md) for detailed documentation on variant grouping features.
 
 ## Timestamp Extraction
 
