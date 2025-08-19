@@ -140,8 +140,13 @@ df <- df %>%
       str_starts(allele_match, "OTHER:") ~ "other",
       TRUE ~ "unknown"
     ),
-    # Create simplified support classification
-    support = ifelse(contains_variant, "variant", "reference"),
+    # Create simplified support classification that includes 'other'
+    support = case_when(
+      str_starts(allele_match, "VARIANT") ~ "variant",
+      allele_match == "REFERENCE" ~ "reference",
+      str_starts(allele_match, "OTHER:") ~ "other",
+      TRUE ~ "unknown"
+    ),
     # Add multi-allelic flag
     is_multiallelic = num_alts > 1,
     # Create enhanced plot grouping variable
@@ -263,18 +268,22 @@ cat("Filtered data:", nrow(df_filtered), "records\n")
 # =============================================================================
 cat("\n=== Preparing time series data ===\n")
 
-# Generate time grid for analysis
+# Generate time grid for analysis - use more reasonable intervals for plotting
+# For 72 hours, use 5-minute intervals to reduce data size while maintaining resolution
 time_points <- seq(
   from = global_time_min,
   to = global_time_max,
-  by = "60 secs"  # 1-minute intervals
+  by = "5 mins"  # 5-minute intervals for better performance
 )
 
-cat("Generated", length(time_points), "time points (1-minute intervals)\n")
+cat("Generated", length(time_points), "time points (5-minute intervals)\n")
+cat("Time range:", as.character(min(time_points)), "to", as.character(max(time_points)), "\n")
 
 # Create expanded grid for all combinations
 group_vars <- df_filtered %>%
   distinct(plot_group, plot_title, support)
+
+cat("Group combinations:", nrow(group_vars), "\n")
 
 time_grid <- expand_grid(
   timestamp = time_points,
@@ -282,16 +291,26 @@ time_grid <- expand_grid(
 )
 
 cat("Time grid dimensions:", nrow(time_grid), "rows\n")
+cat("Expected data points per group:", length(time_points), "\n")
 
 # =============================================================================
 # CUMULATIVE READ COUNTING
 # =============================================================================
 cat("\n=== Calculating cumulative read counts ===\n")
 
-# Aggregate reads by time and group
-df_agg <- df_filtered %>%
-  group_by(plot_group, plot_title, support, timestamp) %>%
-  summarise(reads_at_time = n(), .groups = "drop")
+# Round timestamps to match our time grid intervals (5-minute boundaries)
+df_filtered_rounded <- df_filtered %>%
+  mutate(
+    timestamp_rounded = floor_date(timestamp, unit = "5 mins")
+  )
+
+# Aggregate reads by rounded time and group
+df_agg <- df_filtered_rounded %>%
+  group_by(plot_group, plot_title, support, timestamp_rounded) %>%
+  summarise(reads_at_time = n(), .groups = "drop") %>%
+  rename(timestamp = timestamp_rounded)
+
+cat("Aggregated data points:", nrow(df_agg), "\n")
 
 # Merge with time grid and fill missing values
 df_complete <- time_grid %>%
@@ -299,9 +318,12 @@ df_complete <- time_grid %>%
   mutate(reads_at_time = replace_na(reads_at_time, 0)) %>%
   arrange(plot_group, support, timestamp)
 
-# Calculate cumulative sums
+cat("Complete time grid after merge:", nrow(df_complete), "rows\n")
+
+# Calculate cumulative sums - ensure they're calculated properly across the full time range
 df_cumulative <- df_complete %>%
   group_by(plot_group, plot_title, support) %>%
+  arrange(timestamp) %>%
   mutate(
     cumulative_reads = cumsum(reads_at_time),
     rel_time_hours = as.numeric(difftime(timestamp, global_time_min, units = "hours"))
@@ -310,6 +332,16 @@ df_cumulative <- df_complete %>%
 
 cat("Cumulative data prepared with", nrow(df_cumulative), "data points\n")
 
+# Debug: Show sample of cumulative data for verification
+cat("Sample cumulative data (first group):\n")
+sample_group <- df_cumulative %>%
+  filter(plot_group == first(df_cumulative$plot_group)) %>%
+  filter(support == "variant") %>%
+  filter(reads_at_time > 0 | row_number() %% 100 == 1) %>%
+  select(plot_group, support, rel_time_hours, reads_at_time, cumulative_reads) %>%
+  head(10)
+print(sample_group)
+
 # =============================================================================
 # PLOT GENERATION FUNCTIONS
 # =============================================================================
@@ -317,14 +349,22 @@ cat("\n=== Defining plot generation functions ===\n")
 
 create_variant_plot <- function(plot_data, plot_id, plot_title) {
 
-  # Separate variant and reference data
+  # Separate variant, reference, and other data
   variant_data <- plot_data %>% filter(support == "variant")
   reference_data <- plot_data %>% filter(support == "reference")
+  other_data <- plot_data %>% filter(support == "other")
 
   # Calculate key metrics
-  final_variant_count <- max(variant_data$cumulative_reads, na.rm = TRUE)
-  final_reference_count <- max(reference_data$cumulative_reads, na.rm = TRUE)
-  total_reads <- final_variant_count + final_reference_count
+  final_variant_count <- ifelse(nrow(variant_data) > 0, max(variant_data$cumulative_reads, na.rm = TRUE), 0)
+  final_reference_count <- ifelse(nrow(reference_data) > 0, max(reference_data$cumulative_reads, na.rm = TRUE), 0)
+  final_other_count <- ifelse(nrow(other_data) > 0, max(other_data$cumulative_reads, na.rm = TRUE), 0)
+
+  # Handle -Inf case when no data exists
+  final_variant_count <- ifelse(is.infinite(final_variant_count), 0, final_variant_count)
+  final_reference_count <- ifelse(is.infinite(final_reference_count), 0, final_reference_count)
+  final_other_count <- ifelse(is.infinite(final_other_count), 0, final_other_count)
+
+  total_reads <- final_variant_count + final_reference_count + final_other_count
 
   if (total_reads == 0) {
     cat("Warning: No reads found for", plot_id, "\n")
@@ -333,26 +373,32 @@ create_variant_plot <- function(plot_data, plot_id, plot_title) {
 
   vaf <- final_variant_count / total_reads
 
-  # Create the plot
+  # Debug: Show data range for this plot
+  cat("  Plot data range:", min(plot_data$rel_time_hours), "to", max(plot_data$rel_time_hours), "hours\n")
+  cat("  Variant data points:", nrow(variant_data), "Reference data points:", nrow(reference_data), "\n")
+
+  # Create the plot with improved line rendering
   p <- ggplot(plot_data, aes(x = rel_time_hours, y = cumulative_reads, color = support)) +
-    geom_line(size = 1.2, alpha = 0.8) +
-    geom_point(size = 0.5, alpha = 0.6) +
+    geom_line(linewidth = 1.2, alpha = 0.8) +
+    geom_point(size = 0.8, alpha = 0.6) +
     scale_color_manual(
-      values = c("variant" = "#E31A1C", "reference" = "#1F78B4"),
-      labels = c("variant" = "Variant Support", "reference" = "Reference Support")
+      values = c("variant" = "#E31A1C", "reference" = "#1F78B4", "other" = "#33A02C"),
+      labels = c("variant" = "Variant Support", "reference" = "Reference Support", "other" = "Other/Novel")
     ) +
     scale_x_continuous(
       name = "Time (hours)",
       breaks = seq(0, time_window_hours, by = 12),
-      limits = c(0, time_window_hours)
+      limits = c(0, time_window_hours),
+      expand = c(0.01, 0.01)
     ) +
     scale_y_continuous(
       name = "Cumulative Read Count",
-      labels = comma_format()
+      labels = comma_format(),
+      expand = c(0.05, 0.05)
     ) +
     labs(
       title = plot_title,
-      subtitle = glue("VAF: {percent(vaf, accuracy = 0.1)} | Total Reads: {comma(total_reads)} | Variant: {comma(final_variant_count)} | Reference: {comma(final_reference_count)}"),
+      subtitle = glue("VAF: {percent(vaf, accuracy = 0.1)} | Total Reads: {comma(total_reads)} | Variant: {comma(final_variant_count)} | Reference: {comma(final_reference_count)} | Other: {comma(final_other_count)}"),
       color = "Support Type"
     ) +
     theme_minimal(base_size = 12) +
@@ -361,6 +407,8 @@ create_variant_plot <- function(plot_data, plot_id, plot_title) {
       plot.subtitle = element_text(size = 12, color = "gray50"),
       legend.position = "bottom",
       panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_line(colour = "grey90"),
+      panel.grid.major.y = element_line(colour = "grey90"),
       strip.text = element_text(face = "bold")
     )
 
@@ -405,12 +453,18 @@ create_multiallelic_detail_plot <- function(plot_data, plot_id, plot_title) {
   # This function creates detailed plots for multi-allelic variants
   # showing individual alternate allele support
 
-  # Get the original data with allele details
+  # Get the original data with allele details and proper time grid alignment
   detailed_data <- df_filtered %>%
     filter(plot_group == plot_id) %>%
     filter(!is.na(alt_allele_num)) %>%
-    group_by(alt_allele_num, timestamp) %>%
+    mutate(timestamp_rounded = floor_date(timestamp, unit = "5 mins")) %>%
+    group_by(alt_allele_num, timestamp_rounded) %>%
     summarise(reads_at_time = n(), .groups = "drop") %>%
+    rename(timestamp = timestamp_rounded) %>%
+
+    # Create full time grid for each allele
+    complete(alt_allele_num, timestamp = time_points, fill = list(reads_at_time = 0)) %>%
+
     arrange(alt_allele_num, timestamp) %>%
     group_by(alt_allele_num) %>%
     mutate(
