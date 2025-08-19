@@ -356,13 +356,13 @@ pub fn debug_vcf_access(
     // Check for index files in multiple possible locations
     let possible_index_paths = vec![
         format!("{}.tbi", vcf_path.display()),
-        vcf_path.with_extension("vcf.gz.tbi"),
-        vcf_path.with_extension("tbi"),
+        vcf_path.with_extension("vcf.gz.tbi").display().to_string(),
+        vcf_path.with_extension("tbi").display().to_string(),
     ];
 
     println!("\nChecking for index files:");
     for (i, index_path) in possible_index_paths.iter().enumerate() {
-        let path = std::path::Path::new(&index_path.to_string());
+        let path = std::path::Path::new(index_path);
         println!("  Index option {}: {}", i + 1, index_path);
         println!("    Exists: {}", path.exists());
         if path.exists() {
