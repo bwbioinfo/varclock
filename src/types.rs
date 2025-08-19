@@ -50,4 +50,55 @@ impl Variant {
             None
         }
     }
+
+    /// Generate a unique variant group identifier for multi-allelic variants
+    /// Format: chrom:pos:ref>alt1,alt2,alt3
+    pub fn variant_group_id(&self) -> String {
+        format!(
+            "{}:{}:{}>{}",
+            self.chrom,
+            self.pos,
+            self.ref_allele,
+            self.alt_alleles.join(",")
+        )
+    }
+
+    /// Generate a short variant group identifier (hash-based)
+    /// Useful for compact identifiers while preserving uniqueness
+    pub fn variant_group_hash(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.chrom.hash(&mut hasher);
+        self.pos.hash(&mut hasher);
+        self.ref_allele.hash(&mut hasher);
+        for alt in &self.alt_alleles {
+            alt.hash(&mut hasher);
+        }
+
+        format!("VAR_{:08x}", hasher.finish() as u32)
+    }
+
+    /// Get a human-readable variant summary
+    pub fn variant_summary(&self) -> String {
+        if self.is_multiallelic() {
+            format!(
+                "{}:{} {}-allelic {}>{}",
+                self.chrom,
+                self.pos,
+                self.num_alts(),
+                self.ref_allele,
+                self.alt_alleles.join(",")
+            )
+        } else {
+            format!(
+                "{}:{} {}>{}",
+                self.chrom,
+                self.pos,
+                self.ref_allele,
+                self.alt_alleles.join(",")
+            )
+        }
+    }
 }

@@ -43,8 +43,9 @@ struct Args {
     bam: PathBuf,
 
     /// Output file path for results (will be in BGZ-compressed TSV format)
-    /// Contains: read_id, timestamp, allele_match, variant_chrom, variant_pos, variant_ref, variant_alt, variant_description, variant_type, region, region_name, read_start, read_end, mapping_quality
-    /// allele_match values: REFERENCE:sequence (read matches reference), VARIANT:sequence (read matches variant allele)
+    /// Contains: read_id, timestamp, allele_match, variant_chrom, variant_pos, variant_ref, variant_alt, variant_description, variant_type, variant_group_id, variant_summary, region, region_name, read_start, read_end, mapping_quality, num_alts
+    /// allele_match values: REFERENCE:sequence (read matches reference), VARIANT:ALT1:sequence (read matches specific variant allele), OTHER:sequence (novel allele)
+    /// variant_group_id: Unique identifier for multi-allelic variant groups to preserve grouping
     /// File will be compressed using BGZF format and optionally indexed with tabix
     #[arg(short, long)]
     output: PathBuf,
@@ -540,7 +541,7 @@ async fn process_bed_region_async(
 
                             // OUTPUT FORMAT: Tab-separated values with read and variant metadata
                             Some(format!(
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                                 read_id,                    // Read identifier
                                 timestamp,                  // Sequencing timestamp
                                 allele_match,               // VARIANT:ALT1:seq|REFERENCE|OTHER:seq - which allele the read contains
@@ -550,6 +551,8 @@ async fn process_bed_region_async(
                                 matched_alt_allele,         // Alternative allele(s) - specific matched allele or all
                                 matched_description,        // Variant description(s)
                                 matched_type,               // Variant type(s) (SNV/INS/DEL/etc.)
+                                variant.variant_group_id(), // Unique identifier for multi-allelic variant group
+                                variant.variant_summary(),  // Human-readable variant summary with grouping info
                                 bed_region.region_string,   // Genomic region (chr:start-end)
                                 bed_region.region_name,     // Region name/identifier
                                 start_pos,                  // Read start position
@@ -725,7 +728,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the BGZ output file and write TSV header row
     let mut bgz_output = BgzOutput::new(output_path.clone(), args.create_index)?;
 
-    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tregion\tregion_name\tread_start\tread_end\tmapping_quality\tnum_alts") {
+    if let Err(e) = bgz_output.write_line("read_id\ttimestamp\tallele_match\tvariant_chrom\tvariant_pos\tvariant_ref\tvariant_alt\tvariant_description\tvariant_type\tvariant_group_id\tvariant_summary\tregion\tregion_name\tread_start\tread_end\tmapping_quality\tnum_alts") {
         println!("ERROR: Failed to write header to output file: {e:?}");
         return Err(format!("Failed to write header: {e:?}").into());
     }
