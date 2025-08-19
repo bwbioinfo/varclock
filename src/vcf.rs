@@ -110,7 +110,27 @@ fn query_vcf_variants_indexed(
     start_pos: usize,
     end_pos: usize,
 ) -> Result<Vec<Variant>, Box<dyn std::error::Error + Send + Sync>> {
-    // STEP 1: Check if file is gzipped and indexed
+    // STEP 1: Diagnostic logging for path debugging
+    eprintln!("DEBUG: VCF file path: {}", vcf_path.display());
+    eprintln!(
+        "DEBUG: Current working directory: {:?}",
+        std::env::current_dir()
+    );
+    eprintln!("DEBUG: VCF file exists: {}", vcf_path.exists());
+    eprintln!("DEBUG: VCF file is absolute: {}", vcf_path.is_absolute());
+
+    // Check for index file existence
+    let index_path = vcf_path.with_extension("vcf.gz.tbi");
+    let alt_index_path = format!("{}.tbi", vcf_path.display());
+    eprintln!("DEBUG: Expected index path 1: {}", index_path.display());
+    eprintln!("DEBUG: Index path 1 exists: {}", index_path.exists());
+    eprintln!("DEBUG: Expected index path 2: {}", alt_index_path);
+    eprintln!(
+        "DEBUG: Index path 2 exists: {}",
+        std::path::Path::new(&alt_index_path).exists()
+    );
+
+    // Check if file is gzipped and indexed
     let is_gzipped = vcf_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -123,11 +143,36 @@ fn query_vcf_variants_indexed(
 
     // STEP 2: Initialize indexed VCF reader
     // This automatically looks for and loads the corresponding .tbi index file
+    eprintln!("DEBUG: Attempting to build indexed reader...");
     let mut indexed_reader =
-        vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path)?;
+        match vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path) {
+            Ok(reader) => {
+                eprintln!("DEBUG: Successfully created indexed reader");
+                reader
+            }
+            Err(e) => {
+                eprintln!("DEBUG: Failed to create indexed reader: {:?}", e);
+                return Err(format!(
+                    "Failed to create indexed VCF reader for {}: {:?}",
+                    vcf_path.display(),
+                    e
+                )
+                .into());
+            }
+        };
 
     // Read the VCF header containing meta-information and sample data
-    let header = indexed_reader.read_header()?;
+    eprintln!("DEBUG: Attempting to read VCF header...");
+    let header = match indexed_reader.read_header() {
+        Ok(h) => {
+            eprintln!("DEBUG: Successfully read VCF header");
+            h
+        }
+        Err(e) => {
+            eprintln!("DEBUG: Failed to read VCF header: {:?}", e);
+            return Err(format!("Failed to read VCF header: {:?}", e).into());
+        }
+    };
 
     // STEP 3: Create genomic region specification for query
     // Convert usize positions to strongly-typed Position objects (1-based coordinates)
@@ -142,7 +187,24 @@ fn query_vcf_variants_indexed(
 
     // STEP 4: Execute indexed query to get variant iterator
     // This uses the .tbi index to jump directly to file regions containing overlapping variants
-    let query = indexed_reader.query(&header, &region)?;
+    eprintln!(
+        "DEBUG: Attempting to query region: {}:{}-{}",
+        chrom, start_pos, end_pos
+    );
+    let query = match indexed_reader.query(&header, &region) {
+        Ok(q) => {
+            eprintln!("DEBUG: Successfully created region query");
+            q
+        }
+        Err(e) => {
+            eprintln!("DEBUG: Failed to create region query: {:?}", e);
+            return Err(format!(
+                "Failed to query region {}:{}-{}: {:?}",
+                chrom, start_pos, end_pos, e
+            )
+            .into());
+        }
+    };
 
     // Container for extracted variant information
     let mut variants = Vec::new();
@@ -265,4 +327,62 @@ pub fn parse_bnd_variant(ref_bases: &str, alt_bases: &str) -> String {
 
     // Fallback for complex BND notation
     format!("BND_{ref_bases}>{alt_bases}")
+}
+
+/// Debug function to test VCF file access and identify path issues
+///
+/// This function performs basic checks on VCF file accessibility and indexing
+/// to help diagnose issues with absolute paths from different directories.
+pub fn debug_vcf_access(
+    vcf_path: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("=== VCF File Access Debug ===");
+    println!("VCF path: {}", vcf_path.display());
+    println!("Current working directory: {:?}", std::env::current_dir()?);
+    println!("VCF file exists: {}", vcf_path.exists());
+    println!("VCF file is absolute: {}", vcf_path.is_absolute());
+
+    if let Some(parent) = vcf_path.parent() {
+        println!("Parent directory: {}", parent.display());
+        println!("Parent directory exists: {}", parent.exists());
+    }
+
+    // Check file permissions by trying to open it
+    match std::fs::File::open(vcf_path) {
+        Ok(_) => println!("✓ VCF file is readable"),
+        Err(e) => println!("✗ Cannot read VCF file: {}", e),
+    }
+
+    // Check for index files in multiple possible locations
+    let possible_index_paths = vec![
+        format!("{}.tbi", vcf_path.display()),
+        vcf_path.with_extension("vcf.gz.tbi"),
+        vcf_path.with_extension("tbi"),
+    ];
+
+    println!("\nChecking for index files:");
+    for (i, index_path) in possible_index_paths.iter().enumerate() {
+        let path = std::path::Path::new(&index_path.to_string());
+        println!("  Index option {}: {}", i + 1, index_path);
+        println!("    Exists: {}", path.exists());
+        if path.exists() {
+            match std::fs::File::open(path) {
+                Ok(_) => println!("    ✓ Readable"),
+                Err(e) => println!("    ✗ Not readable: {}", e),
+            }
+        }
+    }
+
+    // Try to create the indexed reader
+    println!("\nTesting indexed reader creation:");
+    match vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path) {
+        Ok(_) => println!("✓ Successfully created indexed reader"),
+        Err(e) => {
+            println!("✗ Failed to create indexed reader: {:?}", e);
+            return Err(e.into());
+        }
+    }
+
+    println!("=== Debug Complete ===\n");
+    Ok(())
 }
