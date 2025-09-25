@@ -224,12 +224,10 @@ async fn process_bed_region_async(
     // PHASE 2: EARLY TERMINATION CHECK
     // Skip analysis if no variants present (optimization for sparse regions)
     if variants.is_empty() {
-        if debug {
-            println!(
-                "  No variants found in region {}, skipping...",
-                bed_region.region_string
-            );
-        }
+        println!(
+            "  No variants found in region {} ({}), skipping analysis.",
+            bed_region.region_string, bed_region.region_name
+        );
         return Ok(0);
     }
 

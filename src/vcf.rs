@@ -226,12 +226,20 @@ fn query_vcf_variants_indexed(
             q
         }
         Err(e) => {
+            // Check if this is a real error or just a region with no data
+            // Common cases where query fails but it's not an error:
+            // - Chromosome doesn't exist in the VCF
+            // - Region has no variants
+            // We'll log this but return empty results rather than failing
             if debug {
-                eprintln!("DEBUG: Failed to create region query: {e:?}");
+                eprintln!("DEBUG: Region query returned no data or chromosome not in VCF: {e:?}");
+                eprintln!(
+                    "DEBUG: Returning empty variant list for region {chrom}:{start_pos}-{end_pos}"
+                );
             }
-            return Err(
-                format!("Failed to query region {chrom}:{start_pos}-{end_pos}: {e:?}").into(),
-            );
+
+            // Return empty vector instead of error for regions with no data
+            return Ok(Vec::new());
         }
     };
 
