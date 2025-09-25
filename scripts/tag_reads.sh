@@ -4,21 +4,21 @@
 # tag_bams
 #
 # Description:
-#   Extracts reads supporting specific variants from a TSV file,
-#   tags them with sample information, and outputs sorted and indexed BAMs.
+#   Extracts reads supporting specific variants from a compressed TSV (.tsv.gz)
+#   file, tags them with sample information, and outputs sorted and indexed BAMs.
 #
 # Usage:
-#   ./tag_bams --vcf VARIANTS.vcf --tsv SUPPORT.tsv --bam INPUT.bam --output OUTDIR
+#   ./tag_bams --vcf VARIANTS.vcf --tsv SUPPORT.tsv.gz --bam INPUT.bam --output OUTDIR
 #
 # Author: Nicholas Geoffrion
 # Created: 2025-07-25
-# Version: 1.1
+# Version: 1.2
 ###############################################################################
 
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 --vcf VCF --tsv TSV --bam BAM --output OUTDIR"
+  echo "Usage: $0 --vcf VCF --tsv TSV(.gz) --bam BAM --output OUTDIR"
   exit 1
 }
 
@@ -48,6 +48,13 @@ echo "Using temporary directory: $TMPDIR"
 ml samtools
 ml bcftools
 
+# Pick correct grep based on compression
+if [[ "$TSV" == *.gz ]]; then
+  GREP="zgrep"
+else
+  GREP="grep"
+fi
+
 bcftools query -f '%CHROM\t%POS\t%ALT\n' "$VCF" |
 while IFS=$'\t' read -r chrom pos alt; do
   echo -e "\n>>> Processing $chrom $pos $alt"
@@ -59,12 +66,12 @@ while IFS=$'\t' read -r chrom pos alt; do
 
   # Extract read names
   echo "Extracting read names..."
-  grep -F "$chrom" "$TSV" | grep -F "$pos" | grep -F "$alt" | awk '{print $1}' > "${fullprefix}.txt"
+  $GREP -F "$chrom" "$TSV" | $GREP -F "$pos" | $GREP -F "$alt" | awk '{print $1}' > "${fullprefix}.txt"
   echo "Read names:"
   cat "${fullprefix}.txt"
 
   echo "Extracting read tags..."
-  grep -F "$chrom" "$TSV" | grep -F "$pos" | grep -F "$alt" | awk '{print $1"\t"$3}' > "${fullprefix}.tags.txt"
+  $GREP -F "$chrom" "$TSV" | $GREP -F "$pos" | $GREP -F "$alt" | awk '{print $1"\t"$3}' > "${fullprefix}.tags.txt"
   echo "Tags:"
   cat "${fullprefix}.tags.txt"
 
