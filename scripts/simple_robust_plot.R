@@ -53,6 +53,12 @@ min_reads <- opt$`min-reads`
 time_window_hours <- opt$`time-window`
 group_multiallelic <- opt$`group-multiallelic`
 
+# Extract sample name from input file path (remove all extensions)
+sample_name <- sub("\\.[^.]*$", "", basename(input_file))
+while (grepl("\\.", sample_name)) {
+  sample_name <- sub("\\.[^.]*$", "", sample_name)
+}
+
 # Create output directory
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -213,9 +219,9 @@ cat("Filtered to", nrow(df_filtered), "records for plotting\n")
 # =============================================================================
 cat("\nCreating time series...\n")
 
-create_time_series <- function(group_data, group_id, group_summary, region_id = NA, gene_name = NA, variant_type = NA) {
+create_time_series <- function(group_data, group_summary, region_id = NA, gene_name = NA, variant_type = NA, sample_name = NA) {
 
-  cat("Processing group:", group_id, "\n")
+  cat("Processing group:", group_summary, "\n")
   cat("  Total reads:", nrow(group_data), "\n")
 
   # Filter group data to the analysis time window first
@@ -313,24 +319,25 @@ create_time_series <- function(group_data, group_id, group_summary, region_id = 
           }
         }
 
+        # Construct title with sample name
         if (!is.na(region_id) && region_id != "" && !is.na(gene_name) && gene_name != "") {
           # Both region ID and gene name available: Extract numeric portion - GENEID - variant_info
           numeric_id <- str_extract(region_id, "^\\d+")
           if (!is.na(numeric_id)) {
-            title_text <- paste(numeric_id, "-", gene_name, "-", clean_summary)
+            title_text <- paste(sample_name, "-", numeric_id, "-", gene_name, "-", clean_summary)
           } else {
-            title_text <- paste(region_id, "-", gene_name, "-", clean_summary)
+            title_text <- paste(sample_name, "-", region_id, "-", gene_name, "-", clean_summary)
           }
           str_wrap(title_text, 80)
         } else if (!is.na(gene_name) && gene_name != "" && !str_detect(gene_name, "^chr\\d+:")) {
           # Only gene name available
-          str_wrap(paste(gene_name, "-", clean_summary), 75)
+          str_wrap(paste(sample_name, "-", gene_name, "-", clean_summary), 75)
         } else {
           # No gene information
-          str_wrap(clean_summary, 60)
+          str_wrap(paste(sample_name, "-", clean_summary), 60)
         }
       },
-      subtitle = glue("VAF: {percent(vaf, accuracy = 0.1)} | Total: {comma(total_reads)} | Variant: {comma(final_variant)} | Reference: {comma(final_reference)}")
+      subtitle = glue("VAF: {percent(vaf, accuracy = 0.1)} | Total: {comma(total_reads)} | Variant: {comma(final_variant)} | Reference: {comma(final_reference)} | Dashed lines show detection thresholds")
     ) +
     theme_minimal(base_size = 12) +
     theme(
@@ -339,13 +346,22 @@ create_time_series <- function(group_data, group_id, group_summary, region_id = 
       legend.position = "bottom",
       panel.grid.minor.y = element_blank(),
       panel.grid.minor.x = element_line(color = "grey95", linewidth = 0.3),
-      panel.grid.major = element_line(color = "grey90", linewidth = 0.5)
-    )
+      panel.grid.major = element_line(color = "grey90", linewidth = 0.5),
+      plot.margin = margin(t = 40, r = 5, b = 5, l = 5, unit = "pt")
+    ) +
+    coord_cartesian(clip = "off")
 
-  # Add detection thresholds
+  # Add detection thresholds with shorter lines and text above
+  # ========================================================
+  # This algorithm uses shorter vertical lines with horizontal text above,
+  # nudging labels to the right when they're too close to prevent overlap
+
   thresholds <- c(1, 5, 8, 10, 20, 50)
   palette_colors <- paletteer_d("ggsci::category10_d3")
   colors <- palette_colors[3:8]  # Use colors 3-8 from the palette
+
+  # Collect all valid threshold detections
+  detections <- list()
 
   for (i in seq_along(thresholds)) {
     thresh <- thresholds[i]
@@ -373,14 +389,106 @@ create_time_series <- function(group_data, group_id, group_summary, region_id = 
           sprintf("%d reads - %dm", thresh, minutes_part)
         }
 
-        p <- p +
-          geom_vline(xintercept = first_detection$rel_time_hours,
-                     color = colors[i], linetype = "dashed", alpha = 0.7, size = 0.8) +
-          annotate("text", x = first_detection$rel_time_hours,
-                   y = max(cumulative_data$cumulative_reads) * 0.95,
-                   label = time_label, angle = 90, vjust = -0.5,
-                   size = 3, color = colors[i])
+        detections[[length(detections) + 1]] <- list(
+          time_hours = time_hours,
+          label = time_label,
+          color = colors[i],
+          threshold = thresh
+        )
       }
+    }
+  }
+
+  # Place labels with horizontal nudging for close detections
+  if (length(detections) > 0) {
+    # Sort detections by time
+    time_order <- order(sapply(detections, function(x) x$time_hours))
+    detections <- detections[time_order]
+
+    max_y <- max(cumulative_data$cumulative_reads)
+    time_range <- max(cumulative_data$rel_time_hours) - min(cumulative_data$rel_time_hours)
+
+    # Calculate label width in time units (approximate)
+    label_width_hours <- time_range * 0.06  # Assume text takes ~6% of plot width
+    min_separation <- label_width_hours * 0.2  # Much smaller nudging distance
+
+    # Get plot boundaries
+    plot_time_min <- min(cumulative_data$rel_time_hours)
+    plot_time_max <- max(cumulative_data$rel_time_hours)
+
+    # Calculate positions with horizontal nudging and boundary checking
+    label_positions <- numeric(length(detections))
+    used_positions <- numeric(0)  # Track used label positions
+
+    for (i in seq_along(detections)) {
+      detection <- detections[[i]]
+      base_time <- detection$time_hours
+
+      if (i == 1) {
+        # First label - check if it fits within boundaries
+        label_positions[i] <- max(plot_time_min + label_width_hours/3,
+                                  min(plot_time_max - label_width_hours/3, base_time))
+      } else {
+        # Check distance to previous labels
+        min_distance <- min(abs(label_positions[1:(i-1)] - base_time))
+
+        if (min_distance < min_separation) {
+          # Too close - nudge to the right
+          nudge_amount <- min_separation - min_distance + label_width_hours * 0.1
+          proposed_position <- base_time + nudge_amount
+
+          # Ensure nudged position doesn't exceed plot boundaries
+          label_positions[i] <- min(plot_time_max - label_width_hours/3, proposed_position)
+        } else {
+          # Ensure position is within boundaries
+          label_positions[i] <- max(plot_time_min + label_width_hours/3,
+                                    min(plot_time_max - label_width_hours/3, base_time))
+        }
+      }
+
+      # Add shortened vertical line (only in upper 40% of plot)
+      line_start <- max_y * 0
+      line_end <- max_y * 0.85
+
+      p <- p +
+        geom_segment(x = detection$time_hours, xend = detection$time_hours,
+                     y = line_start, yend = line_end,
+                     color = detection$color, linetype = "dashed",
+                     alpha = 0.7, linewidth = 0.8)
+
+      # Calculate label position with nudging logic
+      proposed_x <- detection$time_hours
+
+      # Check if too close to any existing labels
+      if (length(used_positions) > 0) {
+        min_distance <- min(abs(used_positions - proposed_x))
+        if (min_distance < min_separation) {
+          # Nudge to the right until we find a clear spot
+          while (any(abs(used_positions - proposed_x) < min_separation) &&
+                 proposed_x < plot_time_max - label_width_hours/3) {
+            proposed_x <- proposed_x + min_separation * 0.3
+          }
+        }
+      }
+
+      # Store this position
+      used_positions <- c(used_positions, proposed_x)
+
+      # Add connector segment if label was nudged
+      if (abs(proposed_x - detection$time_hours) > 0.01) {
+        p <- p +
+          geom_segment(x = detection$time_hours, xend = proposed_x,
+                       y = line_end, yend = line_end * 1.05,
+                       color = detection$color, linetype = "solid",
+                       alpha = 0.7, linewidth = 0.5)
+      }
+
+      # Add text label
+      p <- p +
+        annotate("text", x = proposed_x,
+                 y = line_end * 1.05,
+                 label = detection$label, angle = 90, vjust = 0.5, hjust = -0.1,
+                 size = 2.5, color = detection$color, fontface = "bold")
     }
   }
 
@@ -410,7 +518,7 @@ for (i in 1:nrow(group_counts)) {
   group_data <- df_filtered %>% filter(plot_group == group_id)
 
   tryCatch({
-    result <- create_time_series(group_data, group_id, group_summary, region_id, gene_name, variant_type)
+    result <- create_time_series(group_data, group_summary, region_id, gene_name, variant_type, sample_name)
 
     # Save plot
     safe_filename <- str_replace_all(group_id, "[^A-Za-z0-9_.-]", "_")
