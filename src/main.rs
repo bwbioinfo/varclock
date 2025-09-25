@@ -81,20 +81,22 @@ struct Args {
 
 /// Prints detailed information about the current thread pool configuration
 /// This helps confirm that parallel processing is working as expected
-fn print_thread_pool_info() {
-    let num_threads = rayon::current_num_threads();
-    let thread_index = rayon::current_thread_index();
-    println!("Thread pool configured:");
-    println!("  Total worker threads: {num_threads}");
-    println!("  Current thread index: {thread_index:?}");
+fn print_thread_pool_info(debug: bool) {
+    if debug {
+        let num_threads = rayon::current_num_threads();
+        let thread_index = rayon::current_thread_index();
+        println!("Thread pool configured:");
+        println!("  Total worker threads: {num_threads}");
+        println!("  Current thread index: {thread_index:?}");
 
-    // Print system information for context
-    let cpu_count = num_cpus::get();
-    println!("  System CPU cores: {cpu_count}");
-    println!(
-        "  Thread pool efficiency: {:.1}% of available cores",
-        (num_threads as f64 / cpu_count as f64) * 100.0
-    );
+        // Print system information for context
+        let cpu_count = num_cpus::get();
+        println!("  System CPU cores: {cpu_count}");
+        println!(
+            "  Thread pool utilization: {:.0}%",
+            (num_threads as f64 / cpu_count as f64) * 100.0
+        );
+    }
 }
 
 /// Parameters for processing a BED region
@@ -126,10 +128,12 @@ async fn process_bed_region_async(
         debug,
         breakend_span_tolerance,
     } = params;
-    println!(
-        "Processing BED region #{}: {} (async with indexed access)",
-        region_idx, bed_region.region_string
-    );
+    if debug {
+        println!(
+            "Processing BED region #{}: {} (async with indexed access)",
+            region_idx, bed_region.region_string
+        );
+    }
 
     // PHASE 1: VARIANT DISCOVERY
     // First, get all variants in this region
@@ -142,15 +146,18 @@ async fn process_bed_region_async(
                 &bed_region.chrom,
                 bed_region.start_pos,
                 bed_region.end_pos,
+                debug,
             )
         })
     }
     .await??;
 
-    println!(
-        "  Found {} variants in region (indexed VCF)",
-        variants.len()
-    );
+    if debug {
+        println!(
+            "  Found {} variants in region (indexed VCF)",
+            variants.len()
+        );
+    }
 
     // Show detailed variant information including depth data
     if debug {
@@ -192,15 +199,14 @@ async fn process_bed_region_async(
                 depth_info,
                 descriptions_str
             );
-
-            if variant.is_multiallelic() {
+            if debug && variant.is_multiallelic() {
                 println!(
                     "           Multi-allelic: {} alternate alleles",
                     variant.num_alts()
                 );
             }
         }
-        if variants.len() > 5 {
+        if debug && variants.len() > 5 {
             println!(
                 "    DEBUG: ... and {} more variants (showing positions: {})",
                 variants.len() - 5,
@@ -218,10 +224,12 @@ async fn process_bed_region_async(
     // PHASE 2: EARLY TERMINATION CHECK
     // Skip analysis if no variants present (optimization for sparse regions)
     if variants.is_empty() {
-        println!(
-            "  No variants found in region {}, skipping...",
-            bed_region.region_string
-        );
+        if debug {
+            println!(
+                "  No variants found in region {}, skipping...",
+                bed_region.region_string
+            );
+        }
         return Ok(0);
     }
 
@@ -235,11 +243,13 @@ async fn process_bed_region_async(
 
     for (chunk_idx, variant_chunk) in variants.chunks(variant_chunk_size).enumerate() {
         let chunk_start = std::time::Instant::now();
-        println!(
-            "  Processing variant chunk {} ({} variants)...",
-            chunk_idx + 1,
-            variant_chunk.len()
-        );
+        if debug {
+            println!(
+                "  Processing variant chunk {} ({} variants)...",
+                chunk_idx + 1,
+                variant_chunk.len()
+            );
+        }
 
         // PARALLEL VARIANT PROCESSING:
         let chunk_results: Vec<Vec<String>> = {
@@ -258,7 +268,7 @@ async fn process_bed_region_async(
                     let current_thread_id = rayon::current_thread_index().unwrap_or(999);
 
                     // Log thread activity for monitoring (can be disabled for performance if needed)
-                    if variant.pos % 1000 == 0 {  // Log every 1000th variant to avoid spam
+                    if debug && variant.pos % 1000 == 0 {  // Log every 1000th variant to avoid spam
                         println!("      [Thread {}] Processing variant at {}", current_thread_id, variant.pos);
                     }
 
@@ -581,33 +591,36 @@ async fn process_bed_region_async(
                         *count = result.iter().filter(|line| line.contains(&pattern)).count();
                     }
 
-                    if variant.ref_depth.is_some() {
-                        let vcf_ref = variant.ref_depth.unwrap_or(0);
-                        println!("      SANITY CHECK: VCF reports REF={vcf_ref}, we found REF={ref_count} ALT={alt_count} OTHER={other_count}");
+                    // SANITY CHECKS: Compare our counts with VCF-reported depth values
+                    if debug {
+                        if variant.ref_depth.is_some() {
+                            let vcf_ref = variant.ref_depth.unwrap_or(0);
+                            println!("      SANITY CHECK: VCF reports REF={vcf_ref}, we found REF={ref_count} ALT={alt_count} OTHER={other_count}");
 
-                        if variant.is_multiallelic() {
-                            println!("      Multi-allelic breakdown: {}",
-                                    alt_specific_counts.iter().enumerate()
-                                        .map(|(i, c)| format!("ALT{}={}", i+1, c))
-                                        .collect::<Vec<_>>().join(", "));
-                        }
+                            if variant.is_multiallelic() {
+                                println!("      Multi-allelic breakdown: {}",
+                                        alt_specific_counts.iter().enumerate()
+                                            .map(|(i, c)| format!("ALT{}={}", i+1, c))
+                                            .collect::<Vec<_>>().join(", "));
+                            }
 
-                        let ref_diff = (ref_count as i32 - vcf_ref as i32).abs();
-                        if ref_diff > 0 {
-                            println!("      WARNING: Read count mismatch! REF diff: {ref_diff}");
+                            let ref_diff = (ref_count as i32 - vcf_ref as i32).abs();
+                            if ref_diff > 0 {
+                                println!("      WARNING: Read count mismatch! REF diff: {ref_diff}");
+                            } else {
+                                println!("      PASS: Reference read counts match VCF!");
+                            }
+                        } else if let Some(vcf_total) = variant.total_depth {
+                            println!("      SANITY CHECK: VCF reports total depth={}, we found {} supporting reads",
+                                    vcf_total, result.len());
+
+                            let total_diff = (result.len() as i32 - vcf_total as i32).abs();
+                            if total_diff > vcf_total as i32 / 2 { // Allow 50% difference for total depth
+                                println!("      WARNING: Large difference in total depth! Diff: {total_diff}");
+                            }
                         } else {
-                            println!("      PASS: Reference read counts match VCF!");
+                            println!("      SANITY CHECK: No VCF depth information available for comparison");
                         }
-                    } else if let Some(vcf_total) = variant.total_depth {
-                        println!("      SANITY CHECK: VCF reports total depth={}, we found {} supporting reads",
-                                vcf_total, result.len());
-
-                        let total_diff = (result.len() as i32 - vcf_total as i32).abs();
-                        if total_diff > vcf_total as i32 / 2 { // Allow 50% difference for total depth
-                            println!("      WARNING: Large difference in total depth! Diff: {total_diff}");
-                        }
-                    } else {
-                        println!("      SANITY CHECK: No VCF depth information available for comparison");
                     }
 
                     // Show actual allele matches for this variant
@@ -637,9 +650,11 @@ async fn process_bed_region_async(
 
             // THREAD USAGE REPORT: Show how much parallelism was achieved
             let max_concurrent = max_threads_seen.load(std::sync::atomic::Ordering::Relaxed);
-            println!(
-                "    Thread usage: max {max_concurrent} concurrent threads (thread IDs active)"
-            );
+            if debug {
+                println!(
+                    "    Thread usage: max {max_concurrent} concurrent threads (thread IDs active)"
+                );
+            }
 
             results
         };
@@ -651,12 +666,14 @@ async fn process_bed_region_async(
 
         // CHUNK PERFORMANCE REPORT: Show timing and thread usage
         let chunk_duration = chunk_start.elapsed();
-        println!(
-            "    Chunk {} completed in {:.2}s ({} variants processed)",
-            chunk_idx + 1,
-            chunk_duration.as_secs_f64(),
-            variant_chunk.len()
-        );
+        if debug {
+            println!(
+                "    Chunk {} completed in {:.2}s ({} variants processed)",
+                chunk_idx + 1,
+                chunk_duration.as_secs_f64(),
+                variant_chunk.len()
+            );
+        }
     }
 
     // OVERALL PROCESSING PERFORMANCE REPORT
@@ -677,7 +694,11 @@ async fn process_bed_region_async(
         }
     }
 
-    println!("  Processed region #{region_idx} with {lines_written} output lines (async cached)");
+    if debug {
+        println!(
+            "  Processed region #{region_idx} with {lines_written} output lines (async cached)"
+        );
+    }
     Ok(lines_written)
 }
 
@@ -699,7 +720,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Print detailed thread pool information for monitoring
-    print_thread_pool_info();
+    print_thread_pool_info(args.debug);
     println!("Input files:");
     println!("  BED file: {:?}", args.bed);
     println!("  VCF file: {:?}", args.vcf);
@@ -864,15 +885,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let max_tasks_seen = max_concurrent_tasks.load(std::sync::atomic::Ordering::Relaxed);
         let remaining_tasks = global_active_tasks.load(std::sync::atomic::Ordering::Relaxed);
 
-        println!(
-            "Completed chunk with {} regions, {} total regions processed, {} total lines written",
-            chunk.len(),
-            regions_processed,
-            total_lines_written
-        );
-        println!(
-            "  Task concurrency: max {max_tasks_seen} concurrent async tasks, {remaining_tasks} currently active"
-        );
+        if args.debug {
+            println!(
+                "Completed chunk with {} regions, {} total regions processed, {} total lines written",
+                chunk.len(),
+                regions_processed,
+                total_lines_written
+            );
+            println!(
+                "  Task concurrency: max {max_tasks_seen} concurrent async tasks, {remaining_tasks} currently active"
+            );
+        }
     }
 
     println!("Total lines written to output: {total_lines_written}");
@@ -892,16 +915,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // FINAL THREAD AND PERFORMANCE SUMMARY
     let final_max_tasks = max_concurrent_tasks.load(std::sync::atomic::Ordering::Relaxed);
     let final_max_threads = rayon::current_num_threads();
-    println!("=== Thread Usage Summary ===");
-    println!("  Rayon thread pool: {final_max_threads} worker threads configured");
-    println!("  Maximum concurrent async tasks: {final_max_tasks} (region-level parallelism)");
-    println!(
-        "  Hybrid parallelism: {final_max_tasks} async tasks × {final_max_threads} Rayon threads per task"
-    );
-    println!(
-        "  Theoretical max concurrency: {} threads",
-        final_max_tasks * final_max_threads
-    );
+    if args.debug {
+        println!("=== Thread Usage Summary ===");
+        println!("  Rayon thread pool: {final_max_threads} worker threads configured");
+        println!("  Maximum concurrent async tasks: {final_max_tasks} (region-level parallelism)");
+        println!(
+            "  Hybrid parallelism: {final_max_tasks} async tasks × {final_max_threads} Rayon threads per task"
+        );
+        println!(
+            "  Theoretical max concurrency: {} threads",
+            final_max_tasks * final_max_threads
+        );
+    }
     if bed_regions.is_empty() {
         println!("WARNING: No BED regions found! Check if your BED file is empty or malformed.");
         println!("Your BED file should contain lines like:");

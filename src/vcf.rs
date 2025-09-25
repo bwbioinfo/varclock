@@ -52,10 +52,11 @@ pub fn query_vcf_variants_for_region(
     chrom: &str,
     start_pos: usize,
     end_pos: usize,
+    debug: bool,
 ) -> Result<Vec<Variant>, Box<dyn std::error::Error + Send + Sync>> {
     // Use indexed access - no fallback to ensure consistent performance
     // This guarantees O(log n + k) complexity where k is the number of overlapping variants
-    match query_vcf_variants_indexed(vcf_path, chrom, start_pos, end_pos) {
+    match query_vcf_variants_indexed(vcf_path, chrom, start_pos, end_pos, debug) {
         Ok(variants) => Ok(variants),
         Err(index_error) => {
             let error_msg = format!(
@@ -109,26 +110,29 @@ fn query_vcf_variants_indexed(
     chrom: &str,
     start_pos: usize,
     end_pos: usize,
+    debug: bool,
 ) -> Result<Vec<Variant>, Box<dyn std::error::Error + Send + Sync>> {
     // STEP 1: Diagnostic logging for path debugging
-    eprintln!("DEBUG: VCF file path: {}", vcf_path.display());
-    eprintln!(
-        "DEBUG: Current working directory: {:?}",
-        std::env::current_dir()
-    );
-    eprintln!("DEBUG: VCF file exists: {}", vcf_path.exists());
-    eprintln!("DEBUG: VCF file is absolute: {}", vcf_path.is_absolute());
+    if debug {
+        eprintln!("DEBUG: VCF file path: {}", vcf_path.display());
+        eprintln!(
+            "DEBUG: Current working directory: {:?}",
+            std::env::current_dir()
+        );
+        eprintln!("DEBUG: VCF file exists: {}", vcf_path.exists());
+        eprintln!("DEBUG: VCF file is absolute: {}", vcf_path.is_absolute());
 
-    // Check for index file existence
-    let index_path = vcf_path.with_extension("vcf.gz.tbi");
-    let alt_index_path = format!("{}.tbi", vcf_path.display());
-    eprintln!("DEBUG: Expected index path 1: {}", index_path.display());
-    eprintln!("DEBUG: Index path 1 exists: {}", index_path.exists());
-    eprintln!("DEBUG: Expected index path 2: {alt_index_path}");
-    eprintln!(
-        "DEBUG: Index path 2 exists: {}",
-        std::path::Path::new(&alt_index_path).exists()
-    );
+        // Check for index file existence
+        let index_path = vcf_path.with_extension("vcf.gz.tbi");
+        let alt_index_path = format!("{}.tbi", vcf_path.display());
+        eprintln!("DEBUG: Expected index path 1: {}", index_path.display());
+        eprintln!("DEBUG: Index path 1 exists: {}", index_path.exists());
+        eprintln!("DEBUG: Expected index path 2: {alt_index_path}");
+        eprintln!(
+            "DEBUG: Index path 2 exists: {}",
+            std::path::Path::new(&alt_index_path).exists()
+        );
+    }
 
     // Check if file is gzipped and indexed
     let is_gzipped = vcf_path
@@ -143,15 +147,21 @@ fn query_vcf_variants_indexed(
 
     // STEP 2: Initialize indexed VCF reader
     // This automatically looks for and loads the corresponding .tbi index file
-    eprintln!("DEBUG: Attempting to build indexed reader...");
+    if debug {
+        eprintln!("DEBUG: Attempting to build indexed reader...");
+    }
     let mut indexed_reader =
         match vcf::io::indexed_reader::Builder::default().build_from_path(vcf_path) {
             Ok(reader) => {
-                eprintln!("DEBUG: Successfully created indexed reader");
+                if debug {
+                    eprintln!("DEBUG: Successfully created indexed reader");
+                }
                 reader
             }
             Err(e) => {
-                eprintln!("DEBUG: Failed to create indexed reader: {e:?}");
+                if debug {
+                    eprintln!("DEBUG: Failed to create indexed reader: {e:?}");
+                }
                 return Err(format!(
                     "Failed to create indexed VCF reader for {}: {:?}",
                     vcf_path.display(),
@@ -162,26 +172,32 @@ fn query_vcf_variants_indexed(
         };
 
     // Read the VCF header containing meta-information and sample data
-    eprintln!("DEBUG: Attempting to read VCF header...");
+    if debug {
+        eprintln!("DEBUG: Attempting to read VCF header...");
+    }
     let header = match indexed_reader.read_header() {
         Ok(h) => {
-            eprintln!("DEBUG: Successfully read VCF header");
+            if debug {
+                eprintln!("DEBUG: Successfully read VCF header");
 
-            // Debug: List available reference sequences
-            eprintln!("DEBUG: Available reference sequences in VCF:");
-            for (i, (name, _)) in h.contigs().iter().enumerate() {
-                eprintln!("  {i}: {name}");
-                if i >= 10 {
-                    eprintln!("  ... and {} more", h.contigs().len() - 10);
-                    break;
+                // Debug: List available reference sequences
+                eprintln!("DEBUG: Available reference sequences in VCF:");
+                for (i, (name, _)) in h.contigs().iter().enumerate() {
+                    eprintln!("  {i}: {name}");
+                    if i >= 10 {
+                        eprintln!("  ... and {} more", h.contigs().len() - 10);
+                        break;
+                    }
                 }
+                eprintln!("DEBUG: Looking for chromosome: {chrom}");
             }
-            eprintln!("DEBUG: Looking for chromosome: {chrom}");
 
             h
         }
         Err(e) => {
-            eprintln!("DEBUG: Failed to read VCF header: {e:?}");
+            if debug {
+                eprintln!("DEBUG: Failed to read VCF header: {e:?}");
+            }
             return Err(format!("Failed to read VCF header: {e:?}").into());
         }
     };
@@ -199,20 +215,23 @@ fn query_vcf_variants_indexed(
 
     // STEP 4: Execute indexed query to get variant iterator
     // This uses the .tbi index to jump directly to file regions containing overlapping variants
-    eprintln!(
-        "DEBUG: Attempting to query region: {chrom}:{start_pos}-{end_pos}"
-    );
+    if debug {
+        eprintln!("DEBUG: Attempting to query region: {chrom}:{start_pos}-{end_pos}");
+    }
     let query = match indexed_reader.query(&header, &region) {
         Ok(q) => {
-            eprintln!("DEBUG: Successfully created region query");
+            if debug {
+                eprintln!("DEBUG: Successfully created region query");
+            }
             q
         }
         Err(e) => {
-            eprintln!("DEBUG: Failed to create region query: {e:?}");
-            return Err(format!(
-                "Failed to query region {chrom}:{start_pos}-{end_pos}: {e:?}"
-            )
-            .into());
+            if debug {
+                eprintln!("DEBUG: Failed to create region query: {e:?}");
+            }
+            return Err(
+                format!("Failed to query region {chrom}:{start_pos}-{end_pos}: {e:?}").into(),
+            );
         }
     };
 
@@ -364,9 +383,11 @@ pub fn debug_vcf_access(
     }
 
     // Check for index files in multiple possible locations
-    let possible_index_paths = [format!("{}.tbi", vcf_path.display()),
+    let possible_index_paths = [
+        format!("{}.tbi", vcf_path.display()),
         vcf_path.with_extension("vcf.gz.tbi").display().to_string(),
-        vcf_path.with_extension("tbi").display().to_string()];
+        vcf_path.with_extension("tbi").display().to_string(),
+    ];
 
     println!("\nChecking for index files:");
     for (i, index_path) in possible_index_paths.iter().enumerate() {
@@ -438,27 +459,28 @@ pub fn compare_vcf_access_methods(
 
     // Method 2: From VCF's directory with relative path
     if let Some(vcf_dir) = vcf_path.parent()
-        && let Some(filename) = vcf_path.file_name() {
-            println!("\n--- Method 2: Relative Path from VCF Directory ---");
-            println!("Changing to directory: {}", vcf_dir.display());
+        && let Some(filename) = vcf_path.file_name()
+    {
+        println!("\n--- Method 2: Relative Path from VCF Directory ---");
+        println!("Changing to directory: {}", vcf_dir.display());
 
-            match std::env::set_current_dir(vcf_dir) {
-                Ok(_) => {
-                    let relative_path = PathBuf::from(filename);
-                    let rel_result = test_vcf_query(&relative_path, chrom, start_pos, end_pos);
-                    match rel_result {
-                        Ok(count) => println!("✓ Found {count} variants using relative path"),
-                        Err(e) => println!("✗ Failed with relative path: {e}"),
-                    }
-
-                    // Restore original directory
-                    if let Err(e) = std::env::set_current_dir(&original_dir) {
-                        println!("WARNING: Failed to restore directory: {e}");
-                    }
+        match std::env::set_current_dir(vcf_dir) {
+            Ok(_) => {
+                let relative_path = PathBuf::from(filename);
+                let rel_result = test_vcf_query(&relative_path, chrom, start_pos, end_pos);
+                match rel_result {
+                    Ok(count) => println!("✓ Found {count} variants using relative path"),
+                    Err(e) => println!("✗ Failed with relative path: {e}"),
                 }
-                Err(e) => println!("✗ Failed to change to VCF directory: {e}"),
+
+                // Restore original directory
+                if let Err(e) = std::env::set_current_dir(&original_dir) {
+                    println!("WARNING: Failed to restore directory: {e}");
+                }
             }
+            Err(e) => println!("✗ Failed to change to VCF directory: {e}"),
         }
+    }
 
     println!("\n=== Comparison Complete ===");
     Ok(())
